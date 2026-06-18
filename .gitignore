@@ -45,6 +45,18 @@ CTestTestfile.cmake
 Testing/
 _deps/
 
+# --- LaTeX (doc/) -------------------------------------------
+doc/*.pdf
+doc/*.aux
+doc/*.log
+doc/*.out
+doc/*.toc
+doc/*.bbl
+doc/*.blg
+doc/*.fls
+doc/*.fdb_latexmk
+doc/*.synctex.gz
+
 # --- IDEs ---------------------------------------------------
 .idea/
 .vscode/

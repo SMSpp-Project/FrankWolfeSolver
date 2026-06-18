@@ -1,550 +1,563 @@
 # FrankWolfeSolver — Design document
 
-Porting in SMS++ del framework Julia [FrankWolfe.jl](../FrankWolfe.jl) per gli
-algoritmi tipo Frank-Wolfe (conditional gradient). L'obiettivo è implementare
-quanto più possibile *verbatim* gli algoritmi di FrankWolfe.jl, adattati alle
-strutture di SMS++ (Block tree, `C05Function`, `Solver`, `Solution`,
+Porting into SMS++ of the Julia framework [FrankWolfe.jl](https://github.com/ZIB-IOL/FrankWolfe.jl) for
+Frank-Wolfe-type algorithms (conditional gradient). The goal is to implement
+the FrankWolfe.jl algorithms as *verbatim* as possible, adapted to the
+structures of SMS++ (Block tree, `C05Function`, `Solver`, `Solution`,
 `Modification`).
 
-Testo in italiano, identificatori tecnici in inglese, come da convenzioni del
+Text in English, technical identifiers in English, as per the conventions of the
 primer (`SMS++-CONTEXT.md`, §13).
 
-Stato: **design approvato sui punti principali; v1 = vanilla Frank-Wolfe.**
+Status: **design approved on the main points; v1 = vanilla Frank-Wolfe.**
 
 ---
 
-## 1. Cosa è e dove si attacca
+## 1. What it is and where it attaches
 
-`FrankWolfeSolver` è un `CDASolver` che si registra a un Block "padre" con
-questa struttura:
+`FrankWolfeSolver` is a `CDASolver` that registers to a "father" Block with
+this structure:
 
-- una `FRealObjective` la cui `Function` è una `C05Function` (la funzione di
-  *linking*, di cui useremo la *diagonal linearization* = gradiente);
-- un numero arbitrario di **sub-Block**, che contengono *tutte* le variabili e
-  i vincoli (il padre non ha né variabili né vincoli propri);
-- ogni sub-Block ha una `FRealObjective` con dentro una `LinearFunction`,
-  `DQuadFunction` o `QuadFunction`.
+- a `FRealObjective` whose `Function` is a `C05Function` (the *linking*
+  function, of which we use the *diagonal linearization* = gradient);
+- an arbitrary number of **sub-Blocks**, which contain *all* the variables and
+  constraints (the father has neither variables nor constraints of its own);
+- each sub-Block has a `FRealObjective` containing a `LinearFunction`,
+  `DQuadFunction` or `QuadFunction`.
 
-A ciascun sub-Block `FrankWolfeSolver` registra un `:Solver` (l'**LMO** di quel
-Block). I nomi dei solver vengono dai parametri di `Configuration`, esattamente
-come in `LagrangianDualSolver` (LDS): se un sub-Block ha già un `:Solver`
-registrato lo si usa così com'è.
+To each sub-Block `FrankWolfeSolver` registers a `:Solver` (the **LMO** of that
+Block). The names of the solvers come from the `Configuration` parameters, exactly
+as in `LagrangianDualSolver` (LDS): if a sub-Block already has a `:Solver`
+registered it is used as is.
 
-La regione ammissibile complessiva è il **prodotto** delle regioni dei figli:
+The overall feasible region is the **product** of the regions of the children:
 
 ```
 C = conv(C_1) x conv(C_2) x ... x conv(C_k)
 ```
 
-dove `C_j` è la regione ammissibile del sub-Block `j` (anche con vincoli di
-integralità: `FrankWolfeSolver` non li guarda; combinando soluzioni intere come
-combinazione convessa minimizza di fatto sull'inviluppo convesso).
+where `C_j` is the feasible region of sub-Block `j` (even with integrality
+constraints: `FrankWolfeSolver` does not look at them; by combining integer
+solutions as a convex combination it effectively minimizes over the convex
+hull).
 
-### Analogia con LagrangianDualSolver
+### Analogy with LagrangianDualSolver
 
-| Aspetto | LagrangianDualSolver | FrankWolfeSolver |
+| Aspect | LagrangianDualSolver | FrankWolfeSolver |
 |---|---|---|
-| Linking nel padre | **vincoli** lineari | **obiettivo** `C05Function` |
-| Cosa fa col linking | dualizza (moltiplicatori) | linearizza (gradiente) |
-| Solver per i figli | uno per sub-Block | uno per sub-Block (= LMO) |
-| Direzione "verbatim" da copiare | registrazione solver, cache `Configuration`, parametri BSC per-figlio, gestione `Modification` | idem |
+| Linking in the father | linear **constraints** | **objective** `C05Function` |
+| What it does with the linking | dualizes (multipliers) | linearizes (gradient) |
+| Solver for the children | one per sub-Block | one per sub-Block (= LMO) |
+| "Verbatim" direction to copy | solver registration, `Configuration` cache, per-child BSC parameters, `Modification` handling | same |
 
-Gran parte del *plumbing* (registrazione/deregistrazione dei solver dei figli,
-cache di `Configuration`, parametri `str`/`vint` per i `BlockSolverConfig`
-per-figlio, snapshot/ripristino della f.o. dei figli, gestione `Modification`)
-viene copiato il più possibile verbatim da LDS.
+Most of the *plumbing* (registration/deregistration of the children's solvers,
+`Configuration` cache, `str`/`vint` parameters for the per-child
+`BlockSolverConfig`, snapshot/restore of the children's objective,
+`Modification` handling) is copied as verbatim as possible from LDS.
 
 ---
 
-## 2. L'obiettivo composito (unificazione delle tre semantiche)
+## 2. The composite objective (unification of the three semantics)
 
-Le tre semantiche possibili per come la f.o. dei figli entra nel problema sono
-casi particolari di un unico schema di **Frank-Wolfe generalizzato / conditional
-gradient composito**, in cui l'oracolo (= il solver del figlio) tratta
-*esattamente* una parte separabile dell'obiettivo.
+The three possible semantics for how the children's objective enters the problem
+are special cases of a single scheme of **generalized Frank-Wolfe / composite
+conditional gradient**, in which the oracle (= the child's solver) handles
+*exactly* a separable part of the objective.
 
-Obiettivo totale minimizzato:
+Total objective minimized:
 
 ```
 F(x) = f_father(x) + Σ_j h_j(x_j),     h_j(y) = α·⟨c_j, y⟩ + β·q_j(y)
 ```
 
-dove `c_j`, `q_j` sono la parte lineare e quadratica **originali** della f.o.
-del figlio `j`, e `g = ∇f_father(x)`, ristretto al figlio `j` come `g_j`. La
-parte smooth `f_father` viene linearizzata; le `h_j` restano esatte
-nell'oracolo. Le tre opzioni sono i valori di `(α, β)`, selezionati dal
-parametro intero `intLMOObj`:
+where `c_j`, `q_j` are the **original** linear and quadratic parts of the
+objective of child `j`, and `g = ∇f_father(x)`, restricted to child `j` as `g_j`.
+The smooth part `f_father` is linearized; the `h_j` remain exact in the oracle.
+The three options are the values of `(α, β)`, selected by the integer parameter
+`intLMOObj`:
 
-| `intLMOObj` | nome | `(α,β)` | l'oracolo del figlio `j` risolve | tipo LMO |
+| `intLMOObj` | name | `(α,β)` | the oracle of child `j` solves | LMO type |
 |---|---|---|---|---|
 | `0` | `LMOLinear` (default) | `(0,0)` | `min ⟨g_j, v_j⟩` | LP/MILP |
 | `1` | `LMOQuad` | `(0,1)` | `min ⟨g_j, v_j⟩ + q_j(v_j)` | QP/MIQP |
 | `2` | `LMOFull` | `(1,1)` | `min ⟨c_j + g_j, v_j⟩ + q_j(v_j)` | QP/MIQP |
 
-(Il quarto combo `(1,0)` non è richiesto; lo si aggiunge solo se servisse.)
+(The fourth combination `(1,0)` is not required; it is added only if needed.)
 
-**Nota (semantica Block-tree)**: l'obiettivo totale di un Block tree in SMS++ è
-la *somma* di tutte le f.o. dell'albero; è esattamente ciò che un `:MILPSolver`
-sul padre minimizza (f.o. padre + Σ f.o. figli, ricorsivamente). Quindi
-**`LMOFull` è il modo che coincide con l'obiettivo "vero" del Block tree** e con
-ciò che calcola il `:MILPSolver` monolitico. `LMOLinear` (figli ignorati)
-coincide col monolitico solo se i figli hanno f.o. nulla; `LMOQuad` solo se
-hanno f.o. puramente quadratica (parte lineare nulla).
+**Note (Block-tree semantics)**: the total objective of a Block tree in SMS++ is
+the *sum* of all the objectives of the tree; it is exactly what a `:MILPSolver`
+on the father minimizes (father objective + Σ children objectives, recursively).
+Therefore **`LMOFull` is the mode that coincides with the "true" objective of the
+Block tree** and with what the monolithic `:MILPSolver` computes. `LMOLinear`
+(children ignored) coincides with the monolithic one only if the children have a
+null objective; `LMOQuad` only if they have a purely quadratic objective (null
+linear part).
 
-### Meccanica (snapshot + scatter + restore)
+### Mechanics (snapshot + scatter + restore)
 
-Sullo stile di `LagBFunction::cleanup_inner_objective` di LDS:
+In the style of `LagBFunction::cleanup_inner_objective` of LDS:
 
-- in `set_Block`: **snapshot** della f.o. originale di ogni figlio (`c_j`, e la
-  parte quadratica `q_j` se presente);
-- ogni iterazione: scrivo i coefficienti lineari della f.o. del figlio a
+- in `set_Block`: **snapshot** of the original objective of each child (`c_j`, and
+  the quadratic part `q_j` if present);
+- each iteration: I write the linear coefficients of the child's objective to
   `α·c_j + g_j` via `LinearFunction::modify_coefficients` /
-  `DQuadFunction::modify_linear_coefficients`. La parte quadratica non viene mai
-  toccata: resta se `β=1`, va azzerata una volta sola in `set_Block` se `β=0`;
-- in `set_Block(nullptr)`/destructor: **ripristino** la f.o. originale, così il
-  Block resta pulito.
+  `DQuadFunction::modify_linear_coefficients`. The quadratic part is never
+  touched: it remains if `β=1`, and is zeroed out once in `set_Block` if `β=0`;
+- in `set_Block(nullptr)`/destructor: **restore** the original objective, so the
+  Block stays clean.
 
-### Il gap si calcola allo stesso modo in tutti i modi
+### The gap is computed in the same way in all modes
 
-Il **gap di Frank-Wolfe generalizzato** collassa in una forma unica:
+The **generalized Frank-Wolfe gap** collapses into a single form:
 
 ```
 gap(x) = Σ_j [ M_j(x_j) − M_j(v_j) ]   ≥   F(x) − F*
 ```
 
-dove `M_j` è la f.o. del figlio *così come è stata modificata*
-(`⟨α·c_j+g_j, ·⟩ + β·q_j`): `M_j(v_j)` è semplicemente **il valore ottimo che il
-solver del figlio restituisce**, e `M_j(x_j)` è la stessa f.o. valutata
-nell'iterate corrente `x`. In modo `LMOLinear` si riduce esattamente a
-`⟨g,x⟩ − ⟨g,v⟩`. Un'unica routine per il criterio d'arresto, indipendente dal
-modo.
+where `M_j` is the child's objective *as it has been modified*
+(`⟨α·c_j+g_j, ·⟩ + β·q_j`): `M_j(v_j)` is simply **the optimal value that the
+child's solver returns**, and `M_j(x_j)` is the same objective evaluated at the
+current iterate `x`. In `LMOLinear` mode it reduces exactly to
+`⟨g,x⟩ − ⟨g,v⟩`. A single routine for the stopping criterion, independent of the
+mode.
 
-### Sottigliezza per Away-step / Blended Pairwise (post-v1)
+### Subtlety for Away-step / Blended Pairwise (post-v1)
 
-Nei modi `LMOQuad`/`LMOFull` l'oracolo è un QP: la direzione *away* e
-l'`active_set_argminmax` vanno definiti rispetto alla sola parte smooth
-`∇f_father`, con `h_j` che entra solo nell'oracolo e nella line search. Il caso
-classico pulito è `LMOLinear`. La line search esatta resta in forma chiusa se
-*sia* il padre *sia* le `q_j` sono quadratiche (l'Hessiano totale è la somma).
+In the `LMOQuad`/`LMOFull` modes the oracle is a QP: the *away* direction and the
+`active_set_argminmax` must be defined with respect to the smooth part alone
+`∇f_father`, with `h_j` entering only in the oracle and in the line search. The
+clean classic case is `LMOLinear`. The exact line search remains in closed form if
+*both* the father *and* the `q_j` are quadratic (the total Hessian is the sum).
 
-### 2.bis I due problemi: valore all'iterata vs combinazione convessa (`intCvxComb`)
+### 2.bis The two problems: value at the iterate vs convex combination (`intCvxComb`)
 
-Quando i figli hanno una f.o. **non lineare** (`h_j` con `β=1`, modo `LMOFull`),
-lo stesso schema FW può calcolare due quantità diverse — *due problemi diversi* —
-a seconda di come la parte `h_j` entra nel **valore** e nel **gap**. È una
-**feature qualificante** del solver, controllata da `intCvxComb`:
+When the children have a **non-linear** objective (`h_j` with `β=1`, `LMOFull`
+mode), the same FW scheme can compute two different quantities — *two different
+problems* — depending on how the `h_j` part enters the **value** and the **gap**.
+It is a **qualifying feature** of the solver, controlled by `intCvxComb`:
 
-- **(P1) — valore all'iterata** (`intCvxComb = eObjAtX = 0`):
+- **(P1) — value at the iterate** (`intCvxComb = eObjAtX = 0`):
   ```
   F_P1(x) = f_father(x) + Σ_j h_j(x_j)
   ```
-  si minimizza la f.o. composita *vera* sull'inviluppo convesso `conv(C)`: `h_j`
-  è valutata **nell'iterate corrente** `x_j` (che è un punto interno di
-  `conv(C_j)`, non un vertice). È il bound che si otterrebbe ottimizzando
-  esattamente `F` sulla chiusura convessa della regione prodotto.
+  one minimizes the *true* composite objective over the convex hull `conv(C)`:
+  `h_j` is evaluated **at the current iterate** `x_j` (which is an interior point
+  of `conv(C_j)`, not a vertex). It is the bound one would obtain by optimizing
+  `F` exactly over the convex closure of the product region.
 
-- **(P2) — combinazione convessa / Dantzig-Wolfe** (`intCvxComb = eObjCvxComb = 1`,
+- **(P2) — convex combination / Dantzig-Wolfe** (`intCvxComb = eObjCvxComb = 1`,
   **default**):
   ```
   F_P2(x) = f_father(x) + Σ_j ( Σ_k λ_{jk} h_j(v_{jk}) )
   ```
-  `h_j` è la **combinazione convessa dei costi nei vertici** `v_{jk}` dell'active
-  set (i `λ_{jk}` sono i pesi FW), cioè l'**inviluppo convesso** di `h_j` ristretto
-  ai vertici generati. È esattamente il bound di **decomposizione di
-  Dantzig-Wolfe / simplicial decomposition**, e — quando `conv(C_j)` è l'inviluppo
-  convesso intero del figlio — coincide con il **bound di perspective/Perspective-
-  Cut** (P/C) che la formulazione DP rilassata-continua cut-separata calcola.
+  `h_j` is the **convex combination of the costs at the vertices** `v_{jk}` of the
+  active set (the `λ_{jk}` are the FW weights), i.e. the **convex hull** of `h_j`
+  restricted to the generated vertices. It is exactly the **Dantzig-Wolfe
+  decomposition / simplicial decomposition** bound, and — when `conv(C_j)` is the
+  integer convex hull of the child — it coincides with the **perspective/Perspective-
+  Cut** (P/C) bound that the cut-separated continuous-relaxed DP formulation
+  computes.
 
-**Relazione.** Per la disuguaglianza di Jensen (`h_j` convessa, `x_j = Σ_k λ_{jk}
-v_{jk}`): `F_P2(x) ≥ F_P1(x)`, con **uguaglianza per figli lineari** (`q_j=0`):
-in quel caso `h_j` è lineare, la combinazione convessa dei costi-vertice *è*
-`h_j(x_j)`, e i due problemi coincidono. La differenza è puramente nel termine
-non-lineare dei figli.
+**Relation.** By Jensen's inequality (`h_j` convex, `x_j = Σ_k λ_{jk} v_{jk}`):
+`F_P2(x) ≥ F_P1(x)`, with **equality for linear children** (`q_j=0`): in that case
+`h_j` is linear, the convex combination of the vertex costs *is* `h_j(x_j)`, and
+the two problems coincide. The difference is purely in the non-linear term of the
+children.
 
-**Cosa cambia nell'algoritmo** (tutto il resto è identico — **stessa LMO**, stessi
-vertici, stessa direzione):
-- **bookkeeping del costo `f_ci`**: ogni atomo memorizza `c_i = Σ_j h_j(atom_j)`,
-  il costo-figlio *nel vertice*; il termine-figlio del valore corrente è allora
-  `cbar = Σ_i λ_i c_i` (P2) invece di `Σ_j h_j(x_j)` (P1). `cost_x = ⟨g..⟩-pezzo +
+**What changes in the algorithm** (everything else is identical — **same LMO**,
+same vertices, same direction):
+- **bookkeeping of the cost `f_ci`**: each atom stores `c_i = Σ_j h_j(atom_j)`,
+  the child-cost *at the vertex*; the child-term of the current value is then
+  `cbar = Σ_i λ_i c_i` (P2) instead of `Σ_j h_j(x_j)` (P1). `cost_x = ⟨g..⟩-piece +
   (cvx ? cbar : Σ h_j(x_j))`.
-- **line search**: in P2 il termine-figlio è **lineare in γ** lungo `x+γ(v−x)`
-  (interpola `c_i` tra i due atomi), in P1 è **quadratico** (è `h_j` valutata in
-  un punto che si muove). Quindi la line search esatta e il valore lungo il
-  segmento differiscono, **e di conseguenza differiscono le iterate** generate.
-- **gap / criterio d'arresto**: usano `cost_x` coerente col modo; in P2 il gate
-  della line search esatta è rilassato (il modello è lineare-nei-pesi).
+- **line search**: in P2 the child-term is **linear in γ** along `x+γ(v−x)`
+  (it interpolates `c_i` between the two atoms), in P1 it is **quadratic** (it is
+  `h_j` evaluated at a point that moves). Therefore the exact line search and the
+  value along the segment differ, **and consequently the generated iterates
+  differ**.
+- **gap / stopping criterion**: they use `cost_x` consistent with the mode; in P2
+  the gate of the exact line search is relaxed (the model is linear-in-the-weights).
 
-In sintesi: **stesso oracolo, stesso schema, due funzioni-valore diverse** → P2 ≥
-P1, e P2 è il ponte formale tra Frank-Wolfe e Dantzig-Wolfe / Perspective-Cut.
-Questo è ciò che ha permesso di validare `FrankWolfeSolver` (modo P2/`LMOFull`)
-contro `MILPSolver`+DPForm+P/C su `ThermalUnitBlock`: stesso bound a meno di
-tolleranza, anche nel caso di commitment frazionario in cui `P1 ≠ P2`.
+In summary: **same oracle, same scheme, two different value-functions** → P2 ≥
+P1, and P2 is the formal bridge between Frank-Wolfe and Dantzig-Wolfe /
+Perspective-Cut. This is what allowed validating `FrankWolfeSolver` (P2/`LMOFull`
+mode) against `MILPSolver`+DPForm+P/C on `ThermalUnitBlock`: same bound up to
+tolerance, even in the case of fractional commitment in which `P1 ≠ P2`.
 
 ---
 
-## 3. Estrazione del gradiente e scatter sui figli
+## 3. Gradient extraction and scatter onto the children
 
-Il padre `C05Function` ha come *active variables* le `ColVariable` fisicamente
-residenti nei sub-Block. In `set_Block` costruisco una mappa
+The father `C05Function` has as its *active variables* the `ColVariable`s
+physically residing in the sub-Blocks. In `set_Block` I build a map
 
 ```
 gradient position p  →  (sub-Block j, coefficient index i in B_j's objective)
 ```
 
-iterando le active variables del padre e localizzandone il Block proprietario
-(`ColVariable::get_Block()` / risalita al sub-Block diretto del padre) e la
-posizione nella f.o. lineare del figlio. Questa mappa è statica finché la
-struttura non cambia (cfr. §8 Modification).
+by iterating over the active variables of the father and locating their owning
+Block (`ColVariable::get_Block()` / climbing up to the direct sub-Block of the
+father) and the position in the child's linear objective. This map is static as
+long as the structure does not change (cf. §8 Modification).
 
-Ogni iterazione (nel **main thread**, serialmente, prima del fan-out):
+Each iteration (in the **main thread**, serially, before the fan-out):
 
-1. scrivo l'iterate `x` nelle variabili del Block (`Solution::write`);
-2. sul padre: `compute()` → `compute_new_linearization(true)` →
-   `get_linearization_coefficients(buf)` (assumiamo che il padre non produca mai
-   linearizzazioni *verticali*);
-3. *scatter* di `buf` nei coefficienti lineari dei figli via la mappa e
-   `modify_coefficients`, applicando il modo `(α,β)`;
-4. (parallelo) eseguo gli LMO, raccolgo vertici `v_j` e valori `M_j(v_j)`.
+1. I write the iterate `x` into the variables of the Block (`Solution::write`);
+2. on the father: `compute()` → `compute_new_linearization(true)` →
+   `get_linearization_coefficients(buf)` (we assume the father never produces
+   *vertical* linearizations);
+3. *scatter* of `buf` into the linear coefficients of the children via the map and
+   `modify_coefficients`, applying the `(α,β)` mode;
+4. (parallel) I run the LMOs, collecting vertices `v_j` and values `M_j(v_j)`.
 
-Gestione `min`/`max`: il *sense* del padre deve coincidere con quello dei figli
-(check in `set_Block`, come LDS). `FrankWolfeSolver` minimizza internamente; per
-`eMax` si nega il gradiente / si gestisce il segno coerentemente con il sense
-dei solver dei figli.
+`min`/`max` handling: the *sense* of the father must coincide with that of the
+children (check in `set_Block`, as in LDS). `FrankWolfeSolver` minimizes
+internally; for `eMax` the gradient is negated / the sign is handled consistently
+with the sense of the children's solvers.
 
 ---
 
-## 4. Lo schema di Frank-Wolfe (v1: vanilla)
+## 4. The Frank-Wolfe scheme (v1: vanilla)
 
-Iterate `x` mantenuto come `Solution` del Block padre, ottenuta via
-`Block::get_Solution()` (il tipo concreto dipende dal Block: non ci serve
-saperlo). Atomi e active set arrivano con Away-step/BPCG (post-v1); per il
-vanilla basta l'iterate corrente.
+The iterate `x` is kept as a `Solution` of the father Block, obtained via
+`Block::get_Solution()` (the concrete type depends on the Block: we do not need
+to know it). Atoms and active set come with Away-step/BPCG (post-v1); for the
+vanilla version the current iterate is enough.
 
 ```
-x ← punto iniziale (da un primo LMO con gradiente in un punto di partenza)
+x ← initial point (from a first LMO with gradient at a starting point)
 for t = 0, 1, 2, ... :
-    scrivi x nel Block; compute() padre; g ← ∇f_father(x)          # §3
-    scatter g sui figli (modo α,β)                                  # §2,§3
-    parallel for j in 1..k:  v_j, M_j(v_j) ← LMO_j.compute()       # §5
+    write x into the Block; compute() father; g ← ∇f_father(x)      # §3
+    scatter g onto the children (mode α,β)                          # §2,§3
+    parallel for j in 1..k:  v_j, M_j(v_j) ← LMO_j.compute()        # §5
     gap ← Σ_j [ M_j(x_j) − M_j(v_j) ]                               # §2
     if gap ≤ ε  →  STOP (kOK)
-    d ← x − v            # v = (v_1,...,v_k) come Solution del Block padre
+    d ← x − v            # v = (v_1,...,v_k) as a Solution of the father Block
     γ ← line_search(...) ∈ [0,1]                                    # §6
     x ← (1−γ)·x + γ·v      # Solution::scale + Solution::sum
 ```
 
-La combinazione `(1−γ)x + γv` sfrutta il supporto **nativo** di `Solution` alla
-combinazione (lineare/convessa) — `scale`, `sum` — che ricorre automaticamente
-nei sub-Block. Tutte le `Solution` hanno la stessa interfaccia e qui si
-combinano sempre e solo `Solution` provenienti dallo **stesso** Block (il
-padre), quindi compatibili tra loro qualunque sia il tipo concreto generato dal
-Block: `FrankWolfeSolver` non assume mai un tipo concreto. È anche la base
-"gratuita" dell'Away-step (post-v1): l'active set sarà un insieme di `Solution`
-del padre con pesi `λ_i`.
+The combination `(1−γ)x + γv` exploits the **native** support of `Solution` for
+(linear/convex) combination — `scale`, `sum` — which automatically recurses into
+the sub-Blocks. All `Solution`s have the same interface and here one always and
+only combines `Solution`s coming from the **same** Block (the father), hence
+mutually compatible whatever the concrete type generated by the Block:
+`FrankWolfeSolver` never assumes a concrete type. It is also the "free" basis of
+the Away-step (post-v1): the active set will be a set of `Solution`s of the father
+with weights `λ_i`.
 
 ---
 
-### 4.bis Varianti con active set: Away-step e Blended Pairwise (fatto)
+### 4.bis Variants with active set: Away-step and Blended Pairwise (done)
 
-Parametro `intAlgorithm` ∈ {`AlgVanilla`=0, `AlgAwayStep`=1, `AlgBPCG`=2}.
-Le varianti con active set mantengono l'insieme degli **atomi** (vertici =
-`Solution` del padre) con pesi `λ_i`, `x = Σ λ_i a_i`. Per scegliere l'**away
-vertex** serve `⟨∇F, a_i⟩` per ogni atomo: si scrive l'atomo nel Block e si
-valuta `Σ_j M_j` (le f.o. modificate dei figli) — `eval_modified_objective()`.
+Parameter `intAlgorithm` ∈ {`AlgVanilla`=0, `AlgAwayStep`=1, `AlgBPCG`=2}.
+The variants with active set maintain the set of **atoms** (vertices =
+`Solution`s of the father) with weights `λ_i`, `x = Σ λ_i a_i`. To choose the
+**away vertex** one needs `⟨∇F, a_i⟩` for each atom: the atom is written into the
+Block and `Σ_j M_j` (the modified objectives of the children) is evaluated —
+`eval_modified_objective()`.
 
-- **Away vertex**: `a = argmax_i ⟨∇F,a_i⟩` (argmin se `eMax`), peso `λ_a`.
-- **FW vertex**: `v` dall'LMO. `fw_gap = ⟨∇F, x−v⟩`, `away_gap = ⟨∇F, a−x⟩`
-  (entrambi ≥0; `fw_gap` certifica l'ottimalità → criterio d'arresto).
-- **Away-step**: se `fw_gap ≥ away_gap` → FW step (`d=x−v`, `γ_max=1`); altrimenti
-  away step (`d=a−x`, `γ_max=λ_a/(1−λ_a)`); aggiornamento `x ← x − γd`. Drop step
-  se `γ=γ_max` (l'atomo away esce). Pesi: FW `λ_i←(1−γ)λ_i`, `λ_v+=γ`; away
+- **Away vertex**: `a = argmax_i ⟨∇F,a_i⟩` (argmin if `eMax`), weight `λ_a`.
+- **FW vertex**: `v` from the LMO. `fw_gap = ⟨∇F, x−v⟩`, `away_gap = ⟨∇F, a−x⟩`
+  (both ≥0; `fw_gap` certifies optimality → stopping criterion).
+- **Away-step**: if `fw_gap ≥ away_gap` → FW step (`d=x−v`, `γ_max=1`); otherwise
+  away step (`d=a−x`, `γ_max=λ_a/(1−λ_a)`); update `x ← x − γd`. Drop step
+  if `γ=γ_max` (the away atom exits). Weights: FW `λ_i←(1−γ)λ_i`, `λ_v+=γ`; away
   `λ_i←(1+γ)λ_i`, `λ_a−=γ`.
 - **BPCG (pairwise)**: `d=a−v`, `γ_max=λ_a`; `x ← x+γ(v−a)`; `λ_a−=γ`, `λ_v+=γ`.
-- **Line search**: stessa esatta, `γ*=clamp(gd/(2Q), 0, γ_max)` con `gd=⟨∇F,d⟩`
-  (= il gap della direzione) e `Q=½⟨d,Ad⟩` da `quad_form` (riusa la struttura
-  quadratica cachata). Agnostic `min(2/(t+2), γ_max)` altrimenti.
-- **Dedup**: ogni nuovo vertice `v` viene cercato fra gli atomi (`find_atom`, per
-  valori delle variabili del padre, tol relativa); se già presente, si somma il
-  peso invece di creare un duplicato.
+- **Line search**: same exact one, `γ*=clamp(gd/(2Q), 0, γ_max)` with `gd=⟨∇F,d⟩`
+  (= the gap of the direction) and `Q=½⟨d,Ad⟩` from `quad_form` (it reuses the
+  cached quadratic structure). Agnostic `min(2/(t+2), γ_max)` otherwise.
+- **Dedup**: each new vertex `v` is searched for among the atoms (`find_atom`, by
+  the values of the father's variables, relative tol); if already present, the
+  weight is added instead of creating a duplicate.
 
-**Active set limitato (`intMaxAtoms`)**: per problemi grossi, dove l'active set può
-crescere e l'argmax `O(|aset|)` diventa il collo di bottiglia, si tiene un tetto.
-`intMaxAtoms` (0 = illimitato). Quando si sfora, gli atomi **meno attivi**
-(contatore `f_count` di iterazioni consecutive con peso > 0 minore; a parità, peso
-minore) vengono **aggregati** in un unico atomo: `ā = Σ_{i∈E}(w_i/W) a_i`, peso
-`W=Σ w_i`. Questo **preserva esattamente `x`** (analogo all'aggregazione dei metodi
-bundle). L'aggregato è **indistinguibile** da un vertice (solo, non è estremo): può
-essere a sua volta away-vertex, droppato, o ri-aggregato (un aggregato recente può
-contenerne di precedenti), e conta nel budget. **Trade-off**: gli aggregati non
-sono vertici → si indebolisce la convergenza lineare dell'away-step (regime
-"bundle aggregato"), in cambio di memoria/costo-per-iterazione limitati.
+**Limited active set (`intMaxAtoms`)**: for large problems, where the active set
+can grow and the argmax `O(|aset|)` becomes the bottleneck, a cap is kept.
+`intMaxAtoms` (0 = unlimited). When it is exceeded, the **least active** atoms
+(counter `f_count` of consecutive iterations with weight > 0 being smaller; in
+case of a tie, smaller weight) are **aggregated** into a single atom:
+`ā = Σ_{i∈E}(w_i/W) a_i`, weight `W=Σ w_i`. This **preserves `x` exactly**
+(analogous to the aggregation of bundle methods). The aggregate is
+**indistinguishable** from a vertex (only, it is not extreme): it can itself be an
+away-vertex, dropped, or re-aggregated (a recent aggregate may contain previous
+ones), and it counts in the budget. **Trade-off**: aggregates are not vertices →
+the linear convergence of the away-step is weakened (the "aggregated bundle"
+regime), in exchange for limited memory/cost-per-iteration.
 
-**Argmax cachato (figli lineari)**: `⟨∇F(x), a_i⟩ = ⟨g(x), a_i⟩ + c_i`, con
-`c_i = ⟨c, a_i⟩` **indipendente da x** (memorizzato per atomo, `Atom::f_ci`,
-calcolato all'inserimento come `M_j(v)−⟨g,v⟩`, aggregato linearmente). Così
-l'argmax è un **prodotto scalare** `⟨f_grad, a_i.f_val⟩ + c_i` — niente write nel
-Block né `Function::compute` per atomo. Con figli quadratici (`!all_lin`) si torna a
-scrivere+valutare. `a_val` (valori dell'away atom) si legge da `f_aset[a_idx].f_val`
-(già memorizzato), niente capture.
+**Cached argmax (linear children)**: `⟨∇F(x), a_i⟩ = ⟨g(x), a_i⟩ + c_i`, with
+`c_i = ⟨c, a_i⟩` **independent of x** (stored per atom, `Atom::f_ci`, computed at
+insertion as `M_j(v)−⟨g,v⟩`, aggregated linearly). Thus the argmax is a **scalar
+product** `⟨f_grad, a_i.f_val⟩ + c_i` — no write into the Block nor
+`Function::compute` per atom. With quadratic children (`!all_lin`) one goes back to
+writing+evaluating. `a_val` (the values of the away atom) is read from
+`f_aset[a_idx].f_val` (already stored), no capture.
 
-Stato: implementato e validato (away-step + BPCG, dedup, active set limitato con
-aggregazione, argmax cachato). 72 combo base + 32 con tetto (incl. `intMaxAtoms=5`)
-+ 32 col caching: `|aset|` al cap, `x` esatto, converge. TODO perf (rimandato): gram
-matrix completa (`active_set_quadratic`) → argmax `O(|aset|²)` invece di
-`O(|aset|·G)`, utile a G grande se l'argmax domina.
+Status: implemented and validated (away-step + BPCG, dedup, limited active set
+with aggregation, cached argmax). 72 base combos + 32 with cap (incl.
+`intMaxAtoms=5`) + 32 with caching: `|aset|` at the cap, `x` exact, converges.
+TODO perf (postponed): full gram matrix (`active_set_quadratic`) → argmax
+`O(|aset|²)` instead of `O(|aset|·G)`, useful for large G if the argmax dominates.
 
 ---
 
-## 5. LMO via i solver dei figli + parallelismo
+## 5. LMO via the children's solvers + parallelism
 
 ### 5.1 LMO
 
-**Acquisizione del `:Solver` LMO (scelta v1)**: per ogni sub-Block si usa il
-`:Solver` **già registrato** ad esso (registrato dalla `BlockSolverConfig`
-ricorsiva del tester, `-S`), all'indice `intLMOSlvr` (default 0) in
-`get_registered_solvers()`. L'acquisizione è **lazy**, alla prima `compute()`
-(non in `set_Block`), perché l'ordine di registrazione dei `:Solver` ai vari
-Block non è garantito quando `FrankWolfeSolver` riceve `set_Block`. È
-responsabilità della config che un `:Solver` adeguato sia registrato a ogni
-figlio (altrimenti `compute()` tira eccezione). La self-registration dai
-parametri propri di `FrankWolfeSolver` à la LDS (`str`/`vstr`/`vint` per
-`BlockSolverConfig` per-figlio) è un'estensione v1.1.
+**Acquisition of the LMO `:Solver` (v1 choice)**: for each sub-Block the `:Solver`
+**already registered** to it is used (registered by the recursive
+`BlockSolverConfig` of the tester, `-S`), at index `intLMOSlvr` (default 0) in
+`get_registered_solvers()`. The acquisition is **lazy**, at the first `compute()`
+(not in `set_Block`), because the registration order of the `:Solver`s to the
+various Blocks is not guaranteed when `FrankWolfeSolver` receives `set_Block`. It
+is the responsibility of the config that a suitable `:Solver` is registered to
+each child (otherwise `compute()` throws an exception). Self-registration from
+`FrankWolfeSolver`'s own parameters à la LDS (`str`/`vstr`/`vint` for the
+per-child `BlockSolverConfig`) is a v1.1 extension.
 
-Ogni sub-Block `j` ha un `:Solver` registrato (l'LMO). Eseguire l'LMO `j`:
+Each sub-Block `j` has a `:Solver` registered (the LMO). Running LMO `j`:
 
-1. (già fatto serialmente: scatter del gradiente nella f.o. del figlio);
+1. (already done serially: scatter of the gradient into the child's objective);
 2. `solver_j->compute()`;
-3. `M_j(v_j) ← solver_j->get_var_value()` (valore ottimo della f.o. modificata);
-4. il vertice `v_j` resta scritto nelle variabili del sub-Block; lo si legge in
-   una `Solution` (via `Block::get_Solution`) quando serve (per `d`, per la
-   combinazione). Le `Solution` dei singoli figli compongono la `Solution` del
-   padre, che ricorre nei sub-Block.
+3. `M_j(v_j) ← solver_j->get_var_value()` (optimal value of the modified objective);
+4. the vertex `v_j` stays written in the variables of the sub-Block; it is read
+   into a `Solution` (via `Block::get_Solution`) when needed (for `d`, for the
+   combination). The `Solution`s of the individual children compose the father's
+   `Solution`, which recurses into the sub-Blocks.
 
-### 5.2 Parallelismo: thread pool persistente bulk-synchronous
+### 5.2 Parallelism: persistent bulk-synchronous thread pool
 
-Il pattern è bulk-synchronous (barriera dopo i `k` LMO), più regolare di quello
-on-demand di `ParallelBundleSolver`. Schema proposto (più efficiente di
-`std::async` per-iterazione + active-wait di PBS):
+The pattern is bulk-synchronous (barrier after the `k` LMOs), more regular than
+the on-demand one of `ParallelBundleSolver`. Proposed scheme (more efficient than
+per-iteration `std::async` + active-wait of PBS):
 
-- **Pool persistente** di `min(intMaxThread, k) − 1` worker thread, creato lazy
-  alla prima `compute()`, **riusato** per tutte le iterazioni e tutte le
-  `compute()`, distrutto in `set_Block(nullptr)`/destructor.
-- **Dispatch ad atomic counter**: `std::atomic<Index> next; while( (i =
-  next.fetch_add(1)) < k ) run_lmo(i);` → bilanciamento dinamico del carico
-  (LMO con tempi diversi), senza partizionamento statico.
-- **Il main thread partecipa** al lavoro. Con `intMaxThread = 1` (default) zero
-  thread extra → path puramente sequenziale (debug, e nessun costo quando non
-  serve).
-- **Sincronizzazione con `condition_variable` + generation counter** (no
-  `sleep`/busy-wait): barriera di dispatch (sveglia i worker) e di join (sveglia
-  il main a completamento).
-- **Risultati in array per-indice** (`v_value[j]`, `v_status[j]`,
-  `v_exception[j]`): nessun lock; ogni worker scrive solo il suo slot; ogni LMO
-  lavora su un Block distinto → nessuna contesa sui lock dei Block.
-- **Eccezioni**: catturate per-slot come `std::exception_ptr` e ri-lanciate nel
-  main dopo la barriera.
+- **Persistent pool** of `min(intMaxThread, k) − 1` worker threads, created lazily
+  at the first `compute()`, **reused** for all iterations and all `compute()`s,
+  destroyed in `set_Block(nullptr)`/destructor.
+- **Atomic counter dispatch**: `std::atomic<Index> next; while( (i =
+  next.fetch_add(1)) < k ) run_lmo(i);` → dynamic load balancing (LMOs with
+  different times), without static partitioning.
+- **The main thread participates** in the work. With `intMaxThread = 1` (default)
+  zero extra threads → a purely sequential path (debug, and no cost when not
+  needed).
+- **Synchronization with `condition_variable` + generation counter** (no
+  `sleep`/busy-wait): dispatch barrier (wakes the workers) and join barrier (wakes
+  the main on completion).
+- **Results in per-index arrays** (`v_value[j]`, `v_status[j]`,
+  `v_exception[j]`): no lock; each worker writes only its own slot; each LMO works
+  on a distinct Block → no contention on the Block locks.
+- **Exceptions**: caught per-slot as `std::exception_ptr` and re-thrown in the
+  main after the barrier.
 
-Precondizioni (documentate): ogni `:Solver` dei figli su un Block distinto;
-lo scatter del gradiente (che emette `Modification`) avviene nel main *prima*
-del fan-out; nessuno stato mutabile condiviso tra worker.
+Preconditions (documented): each children's `:Solver` on a distinct Block; the
+gradient scatter (which emits `Modification`s) happens in the main *before* the
+fan-out; no mutable state shared among workers.
 
-Parametri: `intMaxThread` (default 1).
+Parameters: `intMaxThread` (default 1).
 
-**Implementato (versione semplice)**: visto che per i nostri casi `k` (= numero di
-sub-Block/LMO) è piccolo (2–3), il costo di creare i thread per-chiamata è
-trascurabile rispetto alla risoluzione degli LMO. Quindi `run_LMOs` parallelo è
-load-balanced con **atomic counter** (`next.fetch_add`) su `min(intMaxThread, k)`
-thread (il main partecipa), niente pool persistente. Ogni LMO gira sul suo Block
-figlio **distinto** con l'identità `f_id` prestata al `:Solver` (`set_id(f_id)` in
-`acquire_LMOs`), quindi `lock(f_id)` sul figlio già posseduto da `f_id` non
-contende; nessuno stato mutabile condiviso (ogni LMO scrive solo nel suo figlio e
-nel suo slot `SubBlockData`); eccezioni catturate per-slot (`SubBlockData::excp`) e
-ri-lanciate nel main dopo il join. Validato: 48 run paralleli (`intMaxThread=4`,
-tutti gli algoritmi, con ripetizioni) identici al seriale, nessuna race.
+**Implemented (simple version)**: since for our cases `k` (= number of
+sub-Blocks/LMOs) is small (2–3), the cost of creating the threads per-call is
+negligible compared to solving the LMOs. So the parallel `run_LMOs` is
+load-balanced with an **atomic counter** (`next.fetch_add`) over
+`min(intMaxThread, k)` threads (the main participates), no persistent pool. Each
+LMO runs on its **distinct** child Block with the identity `f_id` lent to the
+`:Solver` (`set_id(f_id)` in `acquire_LMOs`), so `lock(f_id)` on the child already
+owned by `f_id` does not contend; no mutable shared state (each LMO writes only in
+its own child and in its own `SubBlockData` slot); exceptions caught per-slot
+(`SubBlockData::excp`) and re-thrown in the main after the join. Validated: 48
+parallel runs (`intMaxThread=4`, all algorithms, with repetitions) identical to
+the serial one, no races.
 
-**Pool persistente (rimandato)**: lo schema con thread pool + condition_variable
-sopra descritto serve solo se `k` è grande e gli LMO sono minuscoli (creazione
-thread non più trascurabile). Da fare se mai servisse; idem eventuale
-armonizzazione di `ParallelBundleSolver`.
+**Persistent pool (postponed)**: the scheme with thread pool +
+condition_variable described above is needed only if `k` is large and the LMOs are
+tiny (thread creation no longer negligible). To be done if ever needed; likewise
+the possible harmonization of `ParallelBundleSolver`.
 
 ---
 
 ## 6. Line search
 
-Da `FrankWolfe.jl/src/linesearch.jl`, per v1:
+From `FrankWolfe.jl/src/linesearch.jl`, for v1:
 
-- **Agnostic** (`2/(t+2)`, ovvero `l/(t+l)`): nessuna valutazione extra, default
-  sicuro; convergenza `O(1/t)`.
-- **Esatta per obiettivo quadratico**: se `f_father` è `QuadFunction`/
-  `DQuadFunction` (più, nei modi `LMOQuad`/`LMOFull`, le `q_j` quadratiche),
-  `F` è quadratica lungo il segmento e
+- **Agnostic** (`2/(t+2)`, i.e. `l/(t+l)`): no extra evaluation, safe default;
+  convergence `O(1/t)`.
+- **Exact for a quadratic objective**: if `f_father` is `QuadFunction`/
+  `DQuadFunction` (plus, in the `LMOQuad`/`LMOFull` modes, the quadratic `q_j`),
+  `F` is quadratic along the segment and
 
   ```
   γ* = clamp( −⟨∇F(x), d⟩ / ⟨d, A d⟩ , 0, γ_max )
   ```
 
-  con `A` Hessiano totale (`Quad/DQuadFunction` del padre + Σ `q_j`). Per
-  `DQuadFunction` `A` è diagonale; per `QuadFunction` si usa la matrice
-  (Eigen sparse, `get_matrix`).
+  with `A` the total Hessian (`Quad/DQuadFunction` of the father + Σ `q_j`). For
+  `DQuadFunction` `A` is diagonal; for `QuadFunction` the matrix is used (Eigen
+  sparse, `get_matrix`).
 
 Post-v1: `Adaptive`/`Backtracking`, `Shortstep`, `Goldenratio`.
 
-`FrankWolfeSolver` controlla in `set_Block` se la f.o. del padre è
-`Quad`/`DQuadFunction` per abilitare il path esatto (parametro
-`intLineSearch` per la scelta; default = auto: esatta se quadratico,
-altrimenti Agnostic).
+`FrankWolfeSolver` checks in `set_Block` whether the father's objective is
+`Quad`/`DQuadFunction` to enable the exact path (parameter `intLineSearch` for the
+choice; default = auto: exact if quadratic, otherwise Agnostic).
 
 ---
 
-## 7. Interfaccia Solver / CDASolver
+## 7. Solver / CDASolver interface
 
-Base class: **`CDASolver`** (come LDS).
+Base class: **`CDASolver`** (as LDS).
 
-- `compute(bool)`: il loop di §4. Lock del Block padre (pattern LDS:
+- `compute(bool)`: the loop of §4. Lock of the father Block (LDS pattern:
   `is_owned_by` / `lock(f_id)`), `process_outstanding_Modification()`, loop,
   unlock. Return code: `kOK` (gap ≤ ε), `kStopIter`, `kStopTime`,
-  `kLowPrecision`, `kInfeasible`/`kUnbounded` (propagati/tradotti dagli LMO).
-- `get_var_solution(Configuration*)`: scrive l'iterate `x` (la combinazione
-  convessa mantenuta) nelle variabili del Block padre.
-- `has_dual_solution()`: `true` **iff** ogni LMO dei figli è un `CDASolver` e il
-  suo `has_dual_solution()` è `true`. Altrimenti `false`.
-- `get_dual_solution(Configuration*)`: **puro forwarding** — per ogni figlio,
-  `dynamic_cast<CDASolver*>(solver_j)->get_dual_solution(...)`. A terminazione
-  (idealmente esatta) i duali ottimi degli LMO sono moltiplicatori di Lagrange
-  validi per il problema complessivo.
-- `get_lb()`/`get_ub()`: per minimizzazione, `ub = F(x)` (primale ammissibile),
-  `lb = F(x) − gap` (best visto); a terminazione `gap → 0` e coincidono. Segno
-  invertito per massimizzazione.
-- Eventi e parametri base di `ThinComputeInterface` gestiti come di norma.
+  `kLowPrecision`, `kInfeasible`/`kUnbounded` (propagated/translated from the
+  LMOs).
+- `get_var_solution(Configuration*)`: writes the iterate `x` (the maintained
+  convex combination) into the variables of the father Block.
+- `has_dual_solution()`: `true` **iff** every children's LMO is a `CDASolver` and
+  its `has_dual_solution()` is `true`. Otherwise `false`.
+- `get_dual_solution(Configuration*)`: **pure forwarding** — for each child,
+  `dynamic_cast<CDASolver*>(solver_j)->get_dual_solution(...)`. At termination
+  (ideally exact) the optimal duals of the LMOs are valid Lagrange multipliers for
+  the overall problem.
+- `get_lb()`/`get_ub()`: for minimization, `ub = F(x)` (feasible primal),
+  `lb = F(x) − gap` (best seen); at termination `gap → 0` and they coincide. Sign
+  inverted for maximization.
+- Base events and parameters of `ThinComputeInterface` handled as usual.
 
 ---
 
-### 7.bis Variabili dei figli: assunzione "leaf" e TODO nipoti
+### 7.bis Children's variables: "leaf" assumption and grandchildren TODO
 
-La mappa gradiente→figli e lo scatter assumono che ogni variabile *attiva* della
-f.o. del padre appartenga a un **figlio diretto** del padre. In generale le
-variabili di un sub-Block "appartengono" ricorsivamente ai suoi antenati, quindi
-una f.o. del padre potrebbe dipendere da variabili definite in un **nipote** (un
-figlio di un figlio). v1 **assume il caso semplice**: o i figli sono *leaf* (niente
-sub-Block), oppure la f.o. del padre dipende solo dalle variabili dei figli
-diretti.
+The gradient→children map and the scatter assume that each *active* variable of
+the father's objective belongs to a **direct child** of the father. In general the
+variables of a sub-Block "belong" recursively to its ancestors, so a father's
+objective could depend on variables defined in a **grandchild** (a child of a
+child). v1 **assumes the simple case**: either the children are *leaves* (no
+sub-Blocks), or the father's objective depends only on the variables of the direct
+children.
 
-**TODO** (non neutro): se la variabile è definita in un nipote, modificarne il
-coefficiente nella f.o. di quel discendente (non del figlio diretto) potrebbe non
-essere "gradito" al figlio intermedio. Serve, in analogia a
-`LagBFunction::PushCostToOwner`, la possibilità di modificare il coefficiente nel
-Block che *definisce* la variabile quando non è un figlio diretto. Rimandato.
-
----
-
-### 7.ter Convergenza: garanzia solo nel caso smooth (f.o. padre)
-
-`FrankWolfeSolver` linearizza la f.o. del padre. La **convergenza globale al
-minimo è garantita solo se la f.o. del padre è differenziabile** (smooth con
-gradiente Lipschitz): è il caso `[D]QuadFunction`. Se la f.o. del padre è
-**nondifferenziabile** (es. una funzione poliedrale/piecewise-linear), Frank-Wolfe
-con un (sub)gradiente **non ha garanzia di convergere all'ottimo** — è un risultato
-noto: F-W non è il metodo del subgradiente (si "impegna" sul vertice LMO di *quel*
-subgradiente, direzione potenzialmente di salita), e ridurre il passo a 0 (DSS)
-**non** lo risolve. I metodi nonsmooth convergenti richiedono **smoothing**
-(Moreau-Yosida / Nesterov), rate $O(1/\sqrt k)$ (tight); vedi i paper in
-`papers/` (White 1993; survey Braun-Pokutta 2022 §3.2.3; Thekumparampil et al.
-NeurIPS 2020 — *"FW fails to converge if subgradients are used instead of
-gradients"*).
-
-**Decisione**: NON implementiamo un metodo nonsmooth dedicato (nessuna
-applicazione attuale, fix non minore). `FrankWolfeSolver` **non fa alcun
-riferimento diretto** a `PolyhedralFunction` o ad altri tipi nonsmooth: tratta la
-f.o. del padre genericamente come `C05Function` e ne usa la *diagonal
-linearization*. Si **documenta esplicitamente** che la convergenza globale è
-garantita solo per il caso smooth; con f.o. padre nonsmooth l'algoritmo gira
-comunque (può oscillare/stallare, regime Kelley/cutting-plane).
-
-Due cose si tengono comunque, gratis e corrette:
-- il **gap di F-W resta un bound valido** anche nonsmooth:
-  $\text{gap}_t=\langle g_t,x_t-v_t\rangle\ge f(x_t)-f^*$ per ogni convessa e ogni
-  subgradiente $g_t$; quindi `get_lb()`/`get_ub()` sono sempre validi — solo che il
-  bracket **può non chiudersi** se la f.o. padre è nonsmooth;
-- **hook progettuale** (rimandato): un "father-gradient provider" intercambiabile
-  + parametro di smoothing $\mu$ permetterebbe di aggiungere lo smoothing (per una
-  poliedrale: softmax delle righe attive) se mai servisse, senza che il resto dello
-  schema cambi.
+**TODO** (not neutral): if the variable is defined in a grandchild, modifying its
+coefficient in the objective of that descendant (not of the direct child) might
+not be "welcome" to the intermediate child. By analogy with
+`LagBFunction::PushCostToOwner`, the possibility is needed of modifying the
+coefficient in the Block that *defines* the variable when it is not a direct
+child. Postponed.
 
 ---
 
-## 8. Modification e warm-start (implementato)
+### 7.ter Convergence: guarantee only in the smooth case (father objective)
 
-`FrankWolfeSolver` gestisce **lazy** le `Modification` provenienti dagli inner
-Block, mantenendo coerenti le strutture cache e **warm-startando** active set /
-iterata tra una `compute()` e l'altra. La logica ricalca `LagBFunction`, ma è più
-semplice perché `FrankWolfeSolver` è in cima alla catena: **consuma** le
-Modification, non le ri-traduce in `FunctionMod` per un solver esterno.
+`FrankWolfeSolver` linearizes the father's objective. **Global convergence to the
+minimum is guaranteed only if the father's objective is differentiable** (smooth
+with Lipschitz gradient): this is the `[D]QuadFunction` case. If the father's
+objective is **nondifferentiable** (e.g. a polyhedral/piecewise-linear function),
+Frank-Wolfe with a (sub)gradient **has no guarantee of converging to the
+optimum** — it is a known result: F-W is not the subgradient method (it "commits"
+to the LMO vertex of *that* subgradient, a potentially ascent direction), and
+reducing the step to 0 (DSS) **does not** fix it. Convergent nonsmooth methods
+require **smoothing** (Moreau-Yosida / Nesterov), rate $O(1/\sqrt k)$ (tight); see
+the papers in `papers/` (White 1993; survey Braun-Pokutta 2022 §3.2.3;
+Thekumparampil et al. NeurIPS 2020 — *"FW fails to converge if subgradients are
+used instead of gradients"*).
 
-**Meccanica.**
-- Niente `inhibit` globale fra due `compute()`: le Modification esterne si
-  **accodano** in `v_mod`.
-- `process_modifications()`, a inizio `compute()`, drena la coda e la categorizza.
-- `inhibit_Modification(true)` riusato come `play_dumb` **solo attorno
-  all'algoritmo e al restore**: lo scatter (e il restore finale) cambiano le f.o.
-  dei figli e generano Modification "self-inflicted" da ignorare; l'inhibit scarta
-  solo quelle nuove in arrivo, **non** la coda esterna già accumulata.
-- **Restore-at-end**: a fine `compute()` le f.o. dei figli tornano al `c0`
-  originale (`restore_objectives`), così un cambio esterno fra due solve agisce su
-  uno stato pulito e il re-snapshot di `c0` è corretto. A teardown il restore usa
-  `eNoMod` (gli altri `:Solver` potrebbero non esserci più — vedi nota sul crash
-  di teardown).
+**Decision**: we do NOT implement a dedicated nonsmooth method (no current
+application, the fix is non-minor). `FrankWolfeSolver` **makes no direct
+reference** to `PolyhedralFunction` or to other nonsmooth types: it treats the
+father's objective generically as a `C05Function` and uses its *diagonal
+linearization*. It is **explicitly documented** that global convergence is
+guaranteed only for the smooth case; with a nonsmooth father objective the
+algorithm runs anyway (it may oscillate/stall, Kelley/cutting-plane regime).
 
-**Categorizzazione** (`guts_of_process_modifications` → bit-mask), che ricalca la
-*relax test* di LagBFunction (si ricontrolla la fattibilità solo quando il cambio
-può *restringere* la regione):
-- **f.o. padre** (bit 1) → re-cache della struttura quadratica (`analyze_father`);
-  atomi intatti (valori e costi non cambiano).
-- **f.o. figlio** (bit 2) → re-snapshot `c0` (`snapshot_c0`) + ricalcolo dei costi
-  `f_ci` degli atomi (`recompute_atom_costs`), che vengono tenuti.
-- **struttura** (bit 4) — `C05FunctionModVars` sull'obiettivo, `NBModification`,
-  *fissaggio* di variabile → re-analisi completa + drop dell'active set.
-- **regione ammissibile** (bit 8) — `RowConstraintMod` (LHS/RHS) → check;
-  `VariableMod` (segno/integralità), `ConstraintMod` (enforce), `BlockModAD`
-  (del-var / add-constraint) → `0` se *rilassa*, `8`/`4` se *restringe*; `BlockMod`
-  generico → check.
-- **Fissaggio di variabili**: instradato al **reset** (bit 4), non a 8.
-  `ColVariable::is_feasible()` verifica segno/integralità ma **non** il fissaggio
-  (uno *stato*, non un vincolo), quindi un feasibility-check non scarterebbe gli
-  atomi che lo violano → serve il reset.
-- *Nota* (come nel TODO di LagBFunction): la direzione di un `RowConstraintMod`
-  (es. RHS che cresce su `≤` → rilassa) **non** è deducibile senza il valore
-  precedente, quindi quel caso si ricontrolla sempre.
-
-**Parametro `intHandleMod`** (`eModReset` default / `eModFine`): `eModReset` fa
-sempre il caso pessimo (re-analisi completa + drop dell'active set su qualunque
-cambio, nessun warm-start); `eModFine` aggiorna solo la cache interessata e
-**conserva il warm-start**.
-
-**Warm-start** (in `compute_active_set` e `compute_vanilla`): se una `compute()`
-precedente ha lasciato active set / iterata ancora validi (cosa che
-`process_modifications` garantisce sui cambi di sola f.o.), si riparte da lì.
-Vanilla non ha atomi (non può ricostruire `cbar` esatto), ma riusa comunque
-l'iterata `f_x` reinizializzando `cbar = C_lit(f_x)` (esatto per figli lineari,
-"lavato via" dai pesi open-loop altrimenti).
-
-**`feasibility_check`** (eModFine, cambio di regione): scrive ogni atomo, chiama
-`f_Block->is_feasible()`, scarta gli inammissibili e ricostruisce `f_x` dai
-sopravvissuti (combinazione convessa di punti ammissibili → ammissibile); per
-vanilla verifica direttamente `f_x` e lo tiene se ancora ammissibile, altrimenti
-cold restart. **Guard sugli aggregati**: il `f_ci` di un atomo aggregato è la
-combinazione convessa dei costi dei vertici fusi (persi), non `h()` nel punto; con
-active set limitato (`intMaxAtoms>0`) e figli quadratici un cambio-f.o.-figlio non
-lo può ricalcolare esattamente → in quel caso si scarta il warm-start.
-
-**Propagazione dell'infeasibility**: se una LMO ritorna `kInfeasible` la regione
-prodotto è vuota → `compute()` ritorna `kInfeasible` (`run_LMOs` setta
-`f_lmo_infeas`, controllato nel loop e all'init).
+Two things hold anyway, for free and correctly:
+- the **F-W gap remains a valid bound** even in the nonsmooth case:
+  $\text{gap}_t=\langle g_t,x_t-v_t\rangle\ge f(x_t)-f^*$ for every convex
+  function and every subgradient $g_t$; therefore `get_lb()`/`get_ub()` are always
+  valid — only the bracket **may not close** if the father's objective is
+  nonsmooth;
+- **design hook** (postponed): an interchangeable "father-gradient provider" + a
+  smoothing parameter $\mu$ would allow adding smoothing (for a polyhedral one:
+  softmax of the active rows) if ever needed, without the rest of the scheme
+  changing.
 
 ---
 
-## 9. Struttura del modulo e build
+## 8. Modification and warm-start (implemented)
 
-Layout che ricalca `LagrangianDualSolver/`:
+`FrankWolfeSolver` handles **lazily** the `Modification`s coming from the inner
+Blocks, keeping the cache structures consistent and **warm-starting** active set /
+iterate between one `compute()` and the next. The logic mirrors `LagBFunction`,
+but is simpler because `FrankWolfeSolver` is at the top of the chain: it
+**consumes** the Modifications, it does not re-translate them into `FunctionMod`
+for an external solver.
+
+**Mechanics.**
+- No global `inhibit` between two `compute()`s: external Modifications are
+  **enqueued** in `v_mod`.
+- `process_modifications()`, at the start of `compute()`, drains the queue and
+  categorizes it.
+- `inhibit_Modification(true)` reused as `play_dumb` **only around the algorithm
+  and the restore**: the scatter (and the final restore) change the children's
+  objectives and generate "self-inflicted" Modifications to be ignored; the
+  inhibit discards only the new ones arriving, **not** the external queue already
+  accumulated.
+- **Restore-at-end**: at the end of `compute()` the children's objectives return
+  to the original `c0` (`restore_objectives`), so an external change between two
+  solves acts on a clean state and the re-snapshot of `c0` is correct. At teardown
+  the restore uses `eNoMod` (the other `:Solver`s might no longer be there — see
+  the note on the teardown crash).
+
+**Categorization** (`guts_of_process_modifications` → bit-mask), which mirrors the
+*relax test* of LagBFunction (feasibility is re-checked only when the change can
+*restrict* the region):
+- **father objective** (bit 1) → re-cache of the quadratic structure
+  (`analyze_father`); atoms intact (values and costs do not change).
+- **child objective** (bit 2) → re-snapshot `c0` (`snapshot_c0`) + recomputation
+  of the atom costs `f_ci` (`recompute_atom_costs`), which are kept.
+- **structure** (bit 4) — `C05FunctionModVars` on the objective, `NBModification`,
+  variable *fixing* → full re-analysis + drop of the active set.
+- **feasible region** (bit 8) — `RowConstraintMod` (LHS/RHS) → check;
+  `VariableMod` (sign/integrality), `ConstraintMod` (enforce), `BlockModAD`
+  (del-var / add-constraint) → `0` if it *relaxes*, `8`/`4` if it *restricts*;
+  generic `BlockMod` → check.
+- **Variable fixing**: routed to the **reset** (bit 4), not to 8.
+  `ColVariable::is_feasible()` checks sign/integrality but **not** the fixing (a
+  *state*, not a constraint), so a feasibility-check would not discard the atoms
+  that violate it → the reset is needed.
+- *Note* (as in the TODO of LagBFunction): the direction of a `RowConstraintMod`
+  (e.g. RHS growing on `≤` → relaxes) is **not** deducible without the previous
+  value, so that case is always re-checked.
+
+**Parameter `intHandleMod`** (`eModReset` default / `eModFine`): `eModReset`
+always does the worst case (full re-analysis + drop of the active set on any
+change, no warm-start); `eModFine` updates only the affected cache and
+**preserves the warm-start**.
+
+**Warm-start** (in `compute_active_set` and `compute_vanilla`): if a previous
+`compute()` left an active set / iterate still valid (which
+`process_modifications` guarantees on objective-only changes), one restarts from
+there. Vanilla has no atoms (it cannot reconstruct the exact `cbar`), but it still
+reuses the iterate `f_x`, reinitializing `cbar = C_lit(f_x)` (exact for linear
+children, "washed away" by the open-loop weights otherwise).
+
+**`feasibility_check`** (eModFine, region change): it writes each atom, calls
+`f_Block->is_feasible()`, discards the infeasible ones and rebuilds `f_x` from the
+survivors (convex combination of feasible points → feasible); for vanilla it
+checks `f_x` directly and keeps it if still feasible, otherwise a cold restart.
+**Guard on the aggregates**: the `f_ci` of an aggregated atom is the convex
+combination of the costs of the fused (lost) vertices, not `h()` at the point;
+with a limited active set (`intMaxAtoms>0`) and quadratic children a
+child-objective-change cannot recompute it exactly → in that case the warm-start is
+discarded.
+
+**Propagation of infeasibility**: if an LMO returns `kInfeasible` the product
+region is empty → `compute()` returns `kInfeasible` (`run_LMOs` sets
+`f_lmo_infeas`, checked in the loop and at init).
+
+---
+
+## 9. Module structure and build
+
+Layout that mirrors `LagrangianDualSolver/`:
 
 ```
 FrankWolfeSolver/
@@ -552,179 +565,181 @@ FrankWolfeSolver/
 ├── src/FrankWolfeSolver.cpp
 ├── obj/
 ├── makefile        # FWSlvOBJ/INC/H/LIB
-├── makefile-s      # + deps (SMS++ escluso)
+├── makefile-s      # + deps (SMS++ excluded)
 ├── makefile-c      # + SMS++/lib/makefile-c
 ├── CMakeLists.txt
 └── README.md  CHANGELOG.md  LICENSE
 ```
 
-I tester **non** stanno in `FrankWolfeSolver/test`: stanno in `tests/` (vedi
-§10), perché dipendono dai Block "base" e dai loro `:Solver`, che non sono
-dipendenze strette di `FrankWolfeSolver`.
+The testers do **not** live in `FrankWolfeSolver/test`: they live in `tests/`
+(see §10), because they depend on the "base" Blocks and on their `:Solver`s,
+which are not strict dependencies of `FrankWolfeSolver`.
 
 Factory: `SMSpp_insert_in_factory_h` (header), `SMSpp_insert_in_factory_cpp_0(
-FrankWolfeSolver )` (cpp). Prefisso macro makefile: `FWSlv` (sullo stile
+FrankWolfeSolver )` (cpp). Makefile macro prefix: `FWSlv` (in the style of
 `StcBlk`, `SDDPBk`, `MILP`).
 
-### Parametri (sistema a 8 punti, §7 del primer)
+### Parameters (8-point system, §7 of the primer)
 
-I nomi non hanno l'infix `FWSlv`: essendo nel ComputeConfig di un
-`FrankWolfeSolver` è ovvio che siano suoi (a differenza di LDS, dove i nomi
-disambiguano il redirect verso il suo unico inner Solver — meccanismo che qui
-non si applica).
+The names do not have the `FWSlv` infix: being in the ComputeConfig of a
+`FrankWolfeSolver` it is obvious they are its own (unlike LDS, where the names
+disambiguate the redirect towards its single inner Solver — a mechanism that does
+not apply here).
 
 - `int` (v1, no forwarding): `intLMOObj` (0/1/2), `intLineSearch`
-  (auto/agnostic/exact), `intLMOSlvr` (indice del `:Solver` già registrato a
-  ogni figlio da usare come LMO, default 0). Più gli ereditati `intMaxThread`
+  (auto/agnostic/exact), `intLMOSlvr` (index of the `:Solver` already registered
+  to each child to be used as LMO, default 0). Plus the inherited `intMaxThread`
   (default 1), `intMaxIter`.
-- `dbl`: ereditati `dblRelAcc`/`dblAbsAcc` (tolleranza sul gap), `dblMaxTime`.
-- v1.1: `intLMOSlvr` → **`vint_LMOSlvr`** (un indice per LMO; vettore più corto
-  del numero di LMO → i restanti al default 0; vettore vuoto [default] → tutti a
-  0). Più, à la LDS, `str`/`vstr`/`vint` per i `BlockSolverConfig` per-figlio e
-  la cache di `Configuration`, per la self-registration degli LMO.
+- `dbl`: inherited `dblRelAcc`/`dblAbsAcc` (tolerance on the gap), `dblMaxTime`.
+- v1.1: `intLMOSlvr` → **`vint_LMOSlvr`** (one index per LMO; a vector shorter
+  than the number of LMOs → the rest at the default 0; an empty vector [default] →
+  all at 0). Plus, à la LDS, `str`/`vstr`/`vint` for the per-child
+  `BlockSolverConfig`s and the `Configuration` cache, for the self-registration of
+  the LMOs.
 
 ---
 
 ## 10. Test
 
-**Posizione**: un'unica directory `tests/FrankWolfeSolver/` (scaffolding condiviso
-in `fw_test_common.h`, vedi "Tester implementati"), ricalcando
-`tests/LagrangianDualSolver_{MMCF,UC,Box}` — da cui si copia a man bassa
-(`test.cpp`, `makefile`, config `*.txt`, batch). Sta in `tests/` perché dipende
-dai Block base e dai loro `:Solver`, non dipendenze strette di
+**Location**: a single directory `tests/FrankWolfeSolver/` (shared scaffolding in
+`fw_test_common.h`, see "Implemented testers"), mirroring
+`tests/LagrangianDualSolver_{MMCF,UC,Box}` — from which one copies liberally
+(`test.cpp`, `makefile`, config `*.txt`, batch). It lives in `tests/` because it
+depends on the base Blocks and on their `:Solver`s, not strict dependencies of
 `FrankWolfeSolver`.
 
-Ogni tester costruisce un Block padre con f.o. semplice
-(`QuadFunction`/`DQuadFunction` o `PolyhedralFunction`) sopra uno o più Block
-"base" dello stesso tipo:
+Each tester builds a father Block with a simple objective
+(`QuadFunction`/`DQuadFunction` or `PolyhedralFunction`) on top of one or more
+"base" Blocks of the same type:
 
 - `MCFBlock`, `ThermalUnitBlock` (`UCBlock`), `BinaryKnapsackBlock`.
 
-Così lo stesso Block è risolvibile da più `:Solver` e li si confronta.
+This way the same Block is solvable by multiple `:Solver`s and they are compared.
 
-**Validità del cross-check (importante)**: F-W minimizza `F` sull'**inviluppo
-convesso** delle regioni dei figli; un `:MILPSolver` monolitico minimizza sulla
-regione **vera**. I due ottimi coincidono solo quando i due insiemi danno lo
-stesso valore:
+**Validity of the cross-check (important)**: F-W minimizes `F` over the **convex
+hull** of the children's regions; a monolithic `:MILPSolver` minimizes over the
+**true** region. The two optima coincide only when the two sets give the same
+value:
 
-| f.o. padre | figli | FW vs MILP monolitico | `SolverReading` |
+| father objective | children | FW vs monolithic MILP | `SolverReading` |
 |---|---|---|---|
-| lineare / `PolyhedralFunction` | anche interi | uguali (vertici dell'inviluppo interi) | `Exact` (ma vedi caveat sotto) |
-| quadratica (`DQuad`/`Quad`) | **continui** (es. `MCFBlock`) | uguali (conv = regione stessa) | `Exact` |
-| quadratica | interi generici (Knapsack) | FW = rilassamento ≤ ottimo intero | `LowerBound` (bound, non uguaglianza) |
-| quadratica | `ThermalUnitBlock` form. DP (P/C) | **uguali**: la DP descrive l'inviluppo convesso delle soluzioni intere | `Exact` |
+| linear / `PolyhedralFunction` | even integer | equal (vertices of the hull are integer) | `Exact` (but see caveat below) |
+| quadratic (`DQuad`/`Quad`) | **continuous** (e.g. `MCFBlock`) | equal (conv = the region itself) | `Exact` |
+| quadratic | generic integer (Knapsack) | FW = relaxation ≤ integer optimum | `LowerBound` (bound, not equality) |
+| quadratic | `ThermalUnitBlock` DP form. (P/C) | **equal**: the DP describes the convex hull of the integer solutions | `Exact` |
 
-Ordine dei test: **(1) `MCFBlock` continui + padre `DQuadFunction`** → modo
-`LMOLinear`, line search esatta, cross-check `Exact` (primo test, fatto); (2)
-`PolyhedralFunction` padre + figli interi — **caveat sciolto** (vedi §7.ter): `F`
-nondifferenziabile ⇒ **nessuna garanzia di convergenza globale**, F-W gira ma può
-non raggiungere l'ottimo; quindi il test (2) non è un cross-check `Exact` ma una
-verifica empirica (e `get_lb`/`get_ub` danno un bracket valido che può non
-chiudersi). Niente smoothing implementato. (3) `ThermalUnitBlock` con formulazione
-DP (P/C) + padre quadratico → `Exact`, perché la DP caratterizza l'inviluppo
-convesso delle soluzioni intere. Un passo per volta.
+Order of the tests: **(1) continuous `MCFBlock` + `DQuadFunction` father** → mode
+`LMOLinear`, exact line search, cross-check `Exact` (first test, done); (2)
+`PolyhedralFunction` father + integer children — **caveat resolved** (see §7.ter):
+`F` nondifferentiable ⇒ **no guarantee of global convergence**, F-W runs but may
+not reach the optimum; therefore test (2) is not an `Exact` cross-check but an
+empirical verification (and `get_lb`/`get_ub` give a valid bracket that may not
+close). No smoothing implemented. (3) `ThermalUnitBlock` with DP formulation (P/C)
++ quadratic father → `Exact`, because the DP characterizes the convex hull of the
+integer solutions. One step at a time.
 
-**Solver-agnostico, tutto via configurazione**: il codice C++ del tester **non
-fa nessuna assunzione** su quali `:Solver` sono attaccati — né ai sub-Block, né
-al Block padre. Si usa l'infrastruttura di `tests/common_utils.h`:
+**Solver-agnostic, all via configuration**: the C++ code of the tester **makes no
+assumption** about which `:Solver`s are attached — neither to the sub-Blocks, nor
+to the father Block. The infrastructure of `tests/common_utils.h` is used:
 
-- `process_args` (CLI standard: instance, `-B` BlockConfig, `-S`
-  BlockSolverConfig, `-c`/`-p` prefissi); `require_block_config` /
+- `process_args` (standard CLI: instance, `-B` BlockConfig, `-S`
+  BlockSolverConfig, `-c`/`-p` prefixes); `require_block_config` /
   `require_solver_config`;
-- `b_config_Block` applica il `BlockConfig` (-B); `s_config_Block` applica il
-  `BlockSolverConfig` (-S) che **registra i `:Solver`** (al padre e ai figli) e
-  li libera a fine corsa;
-- `SolveAll( block, classify, ref, tol )` gira **tutti** i `:Solver` registrati
-  al padre, stampa la riga uniforme (`print_instance_line`) e fa il
-  **cross-check** (`cross_check`). Per v1: classifier `exact_getter(
-  ObjGetter::VarValue )` (sia `FrankWolfeSolver` sia il solver di confronto
-  letti come ottimo Exact via `get_var_value()`).
+- `b_config_Block` applies the `BlockConfig` (-B); `s_config_Block` applies the
+  `BlockSolverConfig` (-S) which **registers the `:Solver`s** (to the father and
+  to the children) and frees them at the end of the run;
+- `SolveAll( block, classify, ref, tol )` runs **all** the `:Solver`s registered
+  to the father, prints the uniform line (`print_instance_line`) and does the
+  **cross-check** (`cross_check`). For v1: classifier `exact_getter(
+  ObjGetter::VarValue )` (both `FrankWolfeSolver` and the comparison solver read as
+  the Exact optimum via `get_var_value()`).
 
-I `:Solver` per i sub-Block (gli LMO) e il `:Solver` di confronto sul padre sono
-scelti nei file di config. Il solver di confronto sul padre **deve** essere un
-`:MILPSolver` (è l'unico che risolve il problema monolitico appiattito), ma è
-responsabilità di chi scrive il file di config che il Solver sia corretto:
-altrimenti si tira eccezione. `PolyhedralFunction` come f.o. del padre è un buon
-caso non-quadratico (LMO puramente lineare, line search Agnostic).
+The `:Solver`s for the sub-Blocks (the LMOs) and the comparison `:Solver` on the
+father are chosen in the config files. The comparison solver on the father
+**must** be a `:MILPSolver` (it is the only one that solves the flattened
+monolithic problem), but it is the responsibility of whoever writes the config
+file that the Solver is correct: otherwise an exception is thrown.
+`PolyhedralFunction` as the father's objective is a good non-quadratic case (purely
+linear LMO, Agnostic line search).
 
-### Tester implementati
+### Implemented testers
 
-Un'unica directory `tests/FrankWolfeSolver/`, con scaffolding condiviso in
+A single directory `tests/FrankWolfeSolver/`, with shared scaffolding in
 `fw_test_common.h` (namespace `fwtest`: `build_father`, `make_father_objective`,
-`generate_poly`, `collect_vars`, `rnd`/`pos`), e **due** tester che si dividono
-sull'asse "indipendenza dal tipo di Block":
+`generate_poly`, `collect_vars`, `rnd`/`pos`), and **two** testers that split
+along the "independence from the Block type" axis:
 
-- **`test.cpp` (generico, Block-agnostico)** — costruisce un padre con f.o.
-  `DQuad`/`Quad`/`Polyhedral` sopra `-k` figli (di qualunque tipo, da CLI/config)
-  e cross-checka `FrankWolfeSolver` contro il solver di confronto. Con **`-M`**
-  esegue round randomici di Modification **della sola f.o.** (padre, ed
-  eventualmente del primo figlio), che si esprimono attraverso la `FRealObjective`
-  astratta e quindi **non** richiedono di conoscere il tipo del Block. Esercita la
-  branch *cambio-f.o.* di `process_modifications` (re-snapshot `c0`, ricalcolo
-  `f_ci`) e il warm-start, sia vanilla che active-set, sia `eModReset` che
-  `eModFine`.
+- **`test.cpp` (generic, Block-agnostic)** — builds a father with a
+  `DQuad`/`Quad`/`Polyhedral` objective on top of `-k` children (of any type, from
+  CLI/config) and cross-checks `FrankWolfeSolver` against the comparison solver.
+  With **`-M`** it runs random rounds of Modification **of the objective only**
+  (father, and possibly of the first child), which are expressed through the
+  abstract `FRealObjective` and therefore do **not** require knowing the type of
+  the Block. It exercises the *objective-change* branch of `process_modifications`
+  (re-snapshot `c0`, recomputation of `f_ci`) and the warm-start, both vanilla and
+  active-set, both `eModReset` and `eModFine`.
 
-- **`test-mcf.cpp` (MCF-specifico)** — esercita i cambi della **regione
-  ammissibile**, che intrinsecamente richiedono di conoscere il tipo: costruisce
-  `-k` `MCFBlock` sotto un padre `DQuad`, e in round randomici (stile
-  `tests/MCF_MILP`) cambia **costi** (`chg_costs` → cambio f.o.), **capacità**
-  (`chg_ucaps` → cambio regione) o **fissa/sfissa** un arco (chiusura/riapertura =
-  `VariableMod` che restringe/rilassa), sempre con `eModBlck, eModBlck` e capacità
-  intere pulite ≥ 1 (MCFSimplex è sensibile a capacità a molte cifre). Cross-check
-  contro `:MILPSolver` a ogni round, inclusa la **propagazione dell'infeasibility**
-  quando la chiusura di un arco rende l'MCF inammissibile.
+- **`test-mcf.cpp` (MCF-specific)** — exercises the changes of the **feasible
+  region**, which intrinsically require knowing the type: it builds `-k` `MCFBlock`
+  under a `DQuad` father, and in random rounds (style of `tests/MCF_MILP`) it
+  changes **costs** (`chg_costs` → objective change), **capacities** (`chg_ucaps` →
+  region change) or **fixes/unfixes** an arc (closure/reopening = `VariableMod`
+  that restricts/relaxes), always with `eModBlck, eModBlck` and clean integer
+  capacities ≥ 1 (MCFSimplex is sensitive to many-digit capacities). Cross-check
+  against `:MILPSolver` at every round, including the **propagation of
+  infeasibility** when the closure of an arc makes the MCF infeasible.
 
-Entrambi girano in `regression` (statico + round `-M`) e in CMake/ctest
-(`FWS_test`, `FWS_mcf_test`); la matrice di validazione (varianti × `eModReset`/
-`eModFine` × `DQuad`/`Quad`, e cost/cap/fix × seed × istanze) è quella riportata
-nel README del tester.
+Both run in `regression` (static + `-M` rounds) and in CMake/ctest (`FWS_test`,
+`FWS_mcf_test`); the validation matrix (variants × `eModReset`/`eModFine` ×
+`DQuad`/`Quad`, and cost/cap/fix × seed × instances) is the one reported in the
+tester's README.
 
-### Note di implementazione / limiti v1 (compute)
+### Implementation notes / v1 limits (compute)
 
-Il loop vanilla e le varianti active-set sono implementati in `compute()` e
-testati a runtime (vedi "Tester implementati"). Scelte/limiti v1:
+The vanilla loop and the active-set variants are implemented in `compute()` and
+tested at runtime (see "Implemented testers"). v1 choices/limits:
 
-- **Inizializzazione**: un primo LMO al punto corrente (variabili a 0 di
-  default) dà il vertice iniziale `x0 = v0` (sempre ammissibile).
-- **`f_value = F(x)`** calcolato come `f_father(x) + (mx_sum − ⟨g,x⟩)` (vale per
-  tutti i modi; in `LMOLinear` si riduce a `f_father(x)`). `f_bound = F(x) ∓ gap`.
-- **Modification**: gestione lazy completa con warm-start — vedi §8.
-  L'`inhibit_Modification(true)` non è più globale in `set_Block` ma riusato come
-  `play_dumb` solo attorno ad algoritmo e restore.
-- **`LMOLinear` richiede figli `LinearFunction`** (niente parte quadratica da
-  tenere nell'oracolo): se un figlio è DQuad/Quad in `LMOLinear`, `compute()`
-  tira eccezione (usare `LMOQuad`/`LMOFull`). `LMOQuad`/`LMOFull` lasciano la
-  parte quadratica del figlio intatta nell'oracolo.
-- **Line search esatta** quando il padre è quadratico (`DQuadFunction` *o*
-  `QuadFunction`) e i figli sono lineari (Hessiano totale = Hessiano del padre):
-  `γ* = clamp(−gd/(2Q), 0, 1)` con `gd = mv_sum − mx_sum = ⟨∇F,d⟩` e
-  `Q = ½⟨d,Ad⟩ = Σ_p a_p d_p² + Σ_(r,c) q_rc d_r d_c` (diagonale + off-diagonale).
-  La struttura quadratica statica del padre (diagonale `a_p` + off-diagonale da
-  `mat_nd`) è **cachata in `set_Block`**. Padre non-quadratico → `Agnostic`.
-- **LMO sequenziali** (`run_LMOs`); il thread pool persistente (§5.2) è il passo
-  successivo.
-- Il vertice `v_j` viene materializzato nelle variabili del figlio via
-  `lmo->get_var_solution()` dopo `lmo->compute()`.
+- **Initialization**: a first LMO at the current point (variables at 0 by
+  default) gives the initial vertex `x0 = v0` (always feasible).
+- **`f_value = F(x)`** computed as `f_father(x) + (mx_sum − ⟨g,x⟩)` (holds for all
+  modes; in `LMOLinear` it reduces to `f_father(x)`). `f_bound = F(x) ∓ gap`.
+- **Modification**: full lazy handling with warm-start — see §8. The
+  `inhibit_Modification(true)` is no longer global in `set_Block` but reused as
+  `play_dumb` only around the algorithm and the restore.
+- **`LMOLinear` requires `LinearFunction` children** (no quadratic part to keep in
+  the oracle): if a child is DQuad/Quad in `LMOLinear`, `compute()` throws an
+  exception (use `LMOQuad`/`LMOFull`). `LMOQuad`/`LMOFull` leave the child's
+  quadratic part intact in the oracle.
+- **Exact line search** when the father is quadratic (`DQuadFunction` *or*
+  `QuadFunction`) and the children are linear (total Hessian = Hessian of the
+  father): `γ* = clamp(−gd/(2Q), 0, 1)` with `gd = mv_sum − mx_sum = ⟨∇F,d⟩` and
+  `Q = ½⟨d,Ad⟩ = Σ_p a_p d_p² + Σ_(r,c) q_rc d_r d_c` (diagonal + off-diagonal).
+  The static quadratic structure of the father (diagonal `a_p` + off-diagonal from
+  `mat_nd`) is **cached in `set_Block`**. Non-quadratic father → `Agnostic`.
+- **Sequential LMOs** (`run_LMOs`); the persistent thread pool (§5.2) is the next
+  step.
+- The vertex `v_j` is materialized in the child's variables via
+  `lmo->get_var_solution()` after `lmo->compute()`.
 
 ---
 
 ## 11. Milestone
 
-1. **v1 — vanilla Frank-Wolfe end-to-end** (questo doc):
-   - scheletro modulo + factory + parametri base;
-   - `set_Block`: validazione struttura, snapshot f.o. figli, mappa gradiente,
-     registrazione LMO dei figli (verbatim LDS);
-   - gradiente + scatter (modo `LMOLinear` prima, poi `LMOQuad`/`LMOFull`);
-   - loop FW + gap + line search (Agnostic + esatta quadratica);
+1. **v1 — vanilla Frank-Wolfe end-to-end** (this doc):
+   - module skeleton + factory + base parameters;
+   - `set_Block`: structure validation, snapshot of children's objectives,
+     gradient map, registration of the children's LMOs (verbatim LDS);
+   - gradient + scatter (`LMOLinear` mode first, then `LMOQuad`/`LMOFull`);
+   - FW loop + gap + line search (Agnostic + exact quadratic);
    - `get_var_solution` / `get_dual_solution` / `get_lb`-`get_ub`;
-   - parallelismo (pool persistente; ma prima versione seriale per correttezza);
-   - test in `tests/FrankWolfeSolver_<base>` (MCF/Thermal/Knapsack), config-driven,
-     cross-check via `SolveAll` contro un `:MILPSolver` monolitico.
+   - parallelism (persistent pool; but a first serial version for correctness);
+   - tests in `tests/FrankWolfeSolver_<base>` (MCF/Thermal/Knapsack), config-driven,
+     cross-check via `SolveAll` against a monolithic `:MILPSolver`.
 2. **v2** — active set + Away-step + Blended Pairwise (`afw.jl`,
    `blended_pairwise.jl`, `active_set.jl`, `active_set_quadratic.jl`).
-3. **v3** — line search aggiuntive, LMO lazy/cached, trattamento incrementale
-   fine delle `Modification`.
+3. **v3** — additional line searches, lazy/cached LMO, fine incremental treatment
+   of the `Modification`s.
 
 ---
 
-*Aggiornare man mano che le decisioni si consolidano.*
+*To be updated as the decisions consolidate.*

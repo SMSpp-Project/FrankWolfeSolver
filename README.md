@@ -151,6 +151,9 @@ conduct, and the process for submitting merge requests to us.
   Università di Pisa
 
 
+### Contributors
+
+
 ## License
 
 This code is provided free of charge under the [GNU Lesser General Public
