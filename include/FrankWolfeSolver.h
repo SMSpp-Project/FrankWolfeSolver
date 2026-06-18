@@ -26,8 +26,6 @@
  * stronger Dantzig-Wolfe / perspective-cut relaxation of it; see the GENERAL
  * NOTES of the class and the intCvxComb parameter.
  *
- * See FrankWolfeSolver/frank-wolfe-design.md for the full design.
- *
  * \author Antonio Frangioni \n
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n

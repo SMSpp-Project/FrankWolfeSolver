@@ -6,7 +6,7 @@
  *
  * v1 status: structure (set_Block), parameter system, dual-solution
  * forwarding and result accessors are implemented; the vanilla Frank-Wolfe
- * loop in compute() is not yet implemented (see frank-wolfe-design.md).
+ * loop in compute() is not yet implemented.
  *
  * \author Antonio Frangioni \n
  *         Dipartimento di Informatica \n
@@ -384,7 +384,7 @@ void FrankWolfeSolver::set_Block( Block * block )
    }
   }
 
- // v1 assumes a static problem: ignore all Modification (see design doc, §8)
+ // v1 assumes a static problem: ignore all Modification
 
  inhibit_Modification( true );
  }
