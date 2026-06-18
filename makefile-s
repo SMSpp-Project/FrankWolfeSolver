@@ -1,0 +1,54 @@
+##############################################################################
+################################ makefile-s ##################################
+##############################################################################
+#                                                                            #
+#   "with dependencies" makefile of FrankWolfeSolver                         #
+#                                                                            #
+#   The makefile defines internally all external libraries required by       #
+#   FrankWolfeSolver, excluding the SMS++ core ones whose symbols are        #
+#   assumed to have been defined already (e.g. by including                  #
+#   SMS++/lib/makefile). Accordingly, all necessary OBJ, H, -I directives,   #
+#   external libraries + -L< libdirs > are added to the corresponding        #
+#   FWSlv*   macros.                                                         #
+#                                                                            #
+#   Input:  $(CC)        = compiler command                                  #
+#           $(SW)        = compiler options                                  #
+#           $(SMS++INC)  = the -I$( core SMS++ directory )                   #
+#           $(SMS++OBJ)  = the core SMS++ library                            #
+#           $(FWSlvSDR)  = the directory where FrankWolfeSolver source is    #
+#           $(FWSlvODR)  = the directory where the objects have to be put    #
+#                                                                            #
+#   Output: $(FWSlvOBJ)  = the final object(s) / library                     #
+#           $(FWSlvLIB)  = external libraries + -L< libdirs >                #
+#           $(FWSlvH)    = the .h files to include for FrankWolfeSolver      #
+#           $(FWSlvINC)  = the -I$( FrankWolfeSolver directory )             #
+#                                                                            #
+#                              Antonio Frangioni                             #
+#                         Dipartimento di Informatica                        #
+#                             Universita' di Pisa                            #
+#                                                                            #
+##############################################################################
+
+# define & include the necessary modules- - - - - - - - - - - - - - - - - - -
+# if a module is not used in the current configuration, just comment out the
+# corresponding include line
+# each module outputs some macros to be used here:
+# *OBJ is the final object/library
+# *H   is the list of all include files
+# *INC is the -I< include directories >
+
+# include the makefile requiring all external modules in input
+include $(FWSlvSDR)/makefile
+
+# macros to be exported - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+# append external stuff defined in the other makefiles to FWSlvOBJ,
+# FWSlvINC and FWSlvH, thus the := assignment has to be used (use GNU make)
+FWSlvOBJ := $(FWSlvOBJ) $(SMS++OBJ)
+FWSlvINC := $(FWSlvINC) $(SMS++INC)
+FWSlvH := $(FWSlvH) $(SMS++H)
+
+# external libraries for FrankWolfeSolver (those of SMS++)
+FWSlvLIB  =  $(SMS++LIB)
+
+############################ End of makefile #################################
