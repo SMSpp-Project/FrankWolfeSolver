@@ -1,0 +1,547 @@
+%==========================================================================%
+%  FrankWolfeSolver -- Technical report / design note
+%
+%  Describes the porting into SMS++ of the Frank-Wolfe (conditional gradient)
+%  algorithms, the design choices, the novel elements, and in particular the
+%  "qualifying feature" of the two problems (intCvxComb).
+%
+%  Compile with pdflatex (two passes for the cross-references).
+%==========================================================================%
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage[margin=2.6cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage[colorlinks=true,linkcolor=blue!55!black,citecolor=blue!55!black,
+            urlcolor=blue!55!black]{hyperref}
+
+%--------------------------------------------------------------------------%
+% notation
+%--------------------------------------------------------------------------%
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\conv}{\operatorname{conv}}
+\newcommand{\dom}{\operatorname{dom}}
+\newcommand{\clamp}{\operatorname{clamp}}
+\newcommand{\argmin}{\operatorname*{arg\,min}}
+\newcommand{\ip}[2]{\langle #1,\, #2\rangle}
+\newcommand{\ffat}{f_{\mathrm{father}}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\Pone}{(\mathrm{P}_1)}
+\newcommand{\Ptwo}{(\mathrm{P}_2)}
+
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}
+\theoremstyle{remark}
+\newtheorem*{remark}{Remark}
+
+% soak up the few overfull boxes from long ttfamily identifiers
+\emergencystretch=3em
+\hbadness=4000
+
+\lstdefinestyle{cfg}{basicstyle=\ttfamily\small,frame=single,
+  framesep=4pt,rulecolor=\color{black!30},backgroundcolor=\color{black!3},
+  columns=fullflexible,keepspaces=true,xleftmargin=2pt}
+
+\title{\bfseries \code{FrankWolfeSolver}:\\
+       a Frank-Wolfe \code{CDASolver} for SMS++,\\
+       and the \emph{two problems} of a single decomposition}
+\author{Technical documentation of the \code{FrankWolfeSolver} module}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+\code{FrankWolfeSolver} is an SMS++ \code{CDASolver} that ports into C++ the
+Frank-Wolfe (conditional gradient) family of algorithms of the Julia package
+\href{https://github.com/ZIB-IOL/FrankWolfe.jl}{FrankWolfe.jl}, adapting them to
+the SMS++ \code{Block} tree: it minimizes a composite objective over a ``father''
+Block whose feasible region is the \emph{product of the convex hulls} of the
+sub-Block regions, using one \code{:Solver} per sub-Block as a \emph{Linear
+Minimization Oracle} (LMO). This document describes the work done, the design
+choices, and the novel elements. The main conceptual contribution is the
+observation --- and the implementation --- that, \emph{with the same
+decomposition and the same oracle}, a single algorithmic parameter
+(\code{intCvxComb}) makes the solver solve \emph{two distinct problems}: the
+``true'' composite objective over the convex hull, or its (stronger)
+Dantzig-Wolfe / perspective-cut relaxation. We discuss the history and motivation
+of this distinction, prove the relationship between them (Jensen's inequality,
+convex envelope), and detail \emph{exactly what changes in the algorithm} to
+solve one or the other. We close with the lazy handling of \code{Modification}
+with warm-start, and with the experimental validation.
+\end{abstract}
+
+%==========================================================================%
+\section{Introduction and context}\label{sec:intro}
+%==========================================================================%
+
+\code{FrankWolfeSolver} registers to a ``father'' \code{Block} with the following
+structure:
+\begin{itemize}[nosep]
+  \item an \code{FRealObjective} whose \code{Function} is a \code{C05Function}
+        (the \emph{linking} function, of which the \emph{diagonal linearization},
+        i.e.\ the gradient, is used);
+  \item an arbitrary number of \emph{sub-Block}, holding \emph{all} the variables
+        and constraints (the father has none of its own);
+  \item each sub-Block has an \code{FRealObjective} containing a
+        \code{LinearFunction}, \code{DQuadFunction} or \code{QuadFunction}.
+\end{itemize}
+To each sub-Block \code{FrankWolfeSolver} registers a \code{:Solver}, which is its
+LMO; the solver names come from the \code{Configuration} parameters, exactly as in
+\code{LagrangianDualSolver} (LDS). The overall feasible region is the
+\emph{product} of the children's regions,
+\begin{equation}\label{eq:X}
+  X \;=\; \conv(X_1)\times\conv(X_2)\times\cdots\times\conv(X_k),
+\end{equation}
+where $X_j$ is the region of sub-Block $j$. Any integrality constraints in the
+children are \emph{not} looked at by the solver: combining integer solutions as
+convex combinations effectively minimizes over the convex hull $\conv(X_j)$.
+
+\paragraph{Analogy with \code{LagrangianDualSolver}.}
+The kinship is direct and drives much of the \emph{plumbing}, copied
+\emph{verbatim} from LDS where possible (registration/deregistration of the
+children's solvers, \code{Configuration} cache, per-child \code{BlockSolverConfig}
+parameters, snapshot/restore of the children's objective, \code{Modification}
+handling):
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Aspect & \code{LagrangianDualSolver} & \code{FrankWolfeSolver}\\
+\midrule
+Linking in the father & linear \emph{constraints}      & \emph{objective} \code{C05Function}\\
+What it does with it  & dualizes (multipliers)          & linearizes (gradient)\\
+Solver for the children & one per sub-Block             & one per sub-Block ($=$ LMO)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Status.} \emph{v1} implements ``vanilla'' Frank-Wolfe; the active-set
+variants (Away-step and Blended Pairwise) are implemented and tested; the
+\code{Modification} handling with warm-start and the infeasibility propagation are
+complete.
+
+%==========================================================================%
+\section{The composite objective and the three oracle semantics}\label{sec:composite}
+%==========================================================================%
+
+The three possible semantics for how the children's objective enters the problem
+are special cases of a single \emph{generalized Frank-Wolfe / composite
+conditional gradient} scheme, in which the oracle (i.e.\ the child's solver)
+handles \emph{exactly} a separable part of the objective. The total minimized
+objective is
+\begin{equation}\label{eq:F}
+  F(x) \;=\; \ffat(x) \;+\; \sum_{j} h_j(x_j), \qquad
+  h_j(y) \;=\; \alpha\,\ip{c_j}{y} + \beta\,q_j(y),
+\end{equation}
+where $c_j,q_j$ are the \emph{original} linear and quadratic parts of child $j$'s
+objective, $g=\nabla \ffat(x)$ and $g_j$ is its restriction to child $j$. The
+smooth part $\ffat$ is linearized; the $h_j$ stay exact in the oracle. The three
+options are the values of $(\alpha,\beta)$, selected by the integer parameter
+\code{intLMOObj}:
+
+\begin{center}
+\begin{tabular}{@{}clccl@{}}
+\toprule
+\code{intLMOObj} & name & $(\alpha,\beta)$ & child $j$'s oracle solves & LMO type\\
+\midrule
+0 & \code{LMOLinear} (default) & $(0,0)$ & $\min\ \ip{g_j}{v_j}$ & LP/MILP\\
+1 & \code{LMOQuad}             & $(0,1)$ & $\min\ \ip{g_j}{v_j} + q_j(v_j)$ & QP/MIQP\\
+2 & \code{LMOFull}             & $(1,1)$ & $\min\ \ip{c_j+g_j}{v_j} + q_j(v_j)$ & QP/MIQP\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Block-tree semantics.} The total objective of a Block tree in SMS++ is
+the \emph{sum} of all the objectives in the tree: this is exactly what a
+\code{:MILPSolver} on the father minimizes (father objective $+\sum_j$ children's
+objectives, recursively). Therefore \textbf{\code{LMOFull} is the mode that
+coincides with the ``true'' Block-tree objective} and with what the monolithic
+\code{:MILPSolver} computes. \code{LMOLinear} (children ignored) coincides with
+the monolithic one only if the children have a null objective; \code{LMOQuad}
+only if they have a purely quadratic one.
+
+\paragraph{Mechanics: snapshot $+$ scatter $+$ restore.}
+In the style of \code{LagBFunction::cleanup\_inner\_objective} of LDS: in
+\code{set\_Block} each child's original objective is \emph{snapshot}ted ($c_j$,
+and $q_j$ if present); at every iteration the linear coefficients of the child's
+objective are \emph{scattered} to $\alpha\,c_j+g_j$ via
+\code{modify\_linear\_coefficients} (the quadratic part is never touched: it stays
+if $\beta=1$, it is zeroed once and for all if $\beta=0$); at the end of the run
+the original objective is \emph{restored}, so the Block stays clean. Scattering
+onto a \emph{subset} of variables (the subset path) is essential when the father
+touches only some of the child's variables --- the case of the DP formulation
+with perspective cuts, where the cut rows must not be touched.
+
+\paragraph{The gap, identical in all modes.}
+The generalized Frank-Wolfe gap collapses into a single form:
+\begin{equation}\label{eq:gap}
+  \mathrm{gap}(x) \;=\; \sum_j \big[\, M_j(x_j) - M_j(v_j) \,\big] \;\geq\; F(x)-F^*,
+\end{equation}
+where $M_j$ is the child's objective \emph{as modified} ($\ip{\alpha c_j+g_j}{\cdot}
++\beta q_j$): $M_j(v_j)$ is the optimal value returned by the child's solver and
+$M_j(x_j)$ is the same objective evaluated at the current iterate. In
+\code{LMOLinear} it reduces to $\ip{g}{x}-\ip{g}{v}$. A single routine for the
+stopping criterion, independent of the mode.
+
+%==========================================================================%
+\section{The two problems: the heart of the contribution}\label{sec:twoproblems}
+%==========================================================================%
+
+\subsection{History and motivation}
+
+The observation arises from wanting to use \code{FrankWolfeSolver} as a
+\emph{decomposition alternative} to an explicit Dantzig-Wolfe (DW) or
+perspective-cut (P/C) reformulation. In the applications of interest (e.g.\ unit
+commitment with \code{ThermalUnitBlock}) the sub-Block have a \emph{convex
+nonlinear} objective (typically quadratic) and a combinatorial domain; the bound
+one wants to compute is that of the \emph{continuous relaxation} obtained by
+describing the convex hull of the integer solutions --- exactly what a DP
+formulation with perspective cuts computes. The natural question was: \emph{does
+Frank-Wolfe on this father compute that bound, or a different one?}
+
+The answer is that \emph{it depends on how the children's term $h_j$ is
+accounted for}, and that the two accountings correspond to two mathematically
+distinct problems, both legitimate and useful. The same oracle serves both; which
+one is solved is a choice --- and it has become a \emph{qualifying feature} of the
+solver, governed by the \code{intCvxComb} parameter.
+
+\subsection{The two definitions}
+
+Over the same region $X$ of \eqref{eq:X}, with the vertices $v_k$ generated by the
+oracle and the convex weights $\lambda$:
+\begin{align}
+  \Pone\quad & \min_{x\in X}\ \ffat(x) + \sum_j h_j(x_j),
+    \label{eq:P1}\\[2pt]
+  \Ptwo\quad & \min_{\lambda}\ \ffat\!\Big(\textstyle\sum_k \lambda_k v_k\Big)
+    + \sum_j \sum_k \lambda_k^{\,j}\, h_j\big(v_k^{\,j}\big).
+    \label{eq:P2}
+\end{align}
+$\Pone$ evaluates each child cost $h_j$ \emph{at the} (generally fractional)
+\emph{iterate} $x_j$; $\Ptwo$ accounts for it as the \emph{convex combination of
+the vertex costs}, i.e.\ it replaces $h_j$ by its \emph{convex envelope} over the
+generated vertices.
+
+\subsection{The relationship between the two}
+
+Let $f_1,f_2$ be the two objectives as functions of $x\in X$.
+
+\begin{proposition}\label{prop:jensen}
+$f_1$ and $f_2$ agree on the vertices of $X$. By convexity of $h_j$ (Jensen's
+inequality), $f_2(x)\geq f_1(x)$ inside $X$, and $f_2$ is the \emph{convex
+envelope} of $f_1$. Consequently $\mathrm{val}\,\Ptwo \geq \mathrm{val}\,\Pone$:
+$\Ptwo$ is the \emph{stronger} relaxation. The two coincide if and only if all the
+$h_j$ are linear.
+\end{proposition}
+
+\begin{proof}[Proof (sketch)]
+On a vertex $\lambda$ is degenerate, so the two children terms coincide. For
+$x_j=\sum_k\lambda_k^j v_k^j$ with $h_j$ convex, Jensen gives
+$h_j(x_j)\le\sum_k\lambda_k^j h_j(v_k^j)$, whence $f_1\le f_2$ pointwise; the
+difference is zero exactly when each $h_j$ is affine on the active vertices, i.e.\
+(for every choice of vertices) when the $h_j$ are linear.
+\end{proof}
+
+\paragraph{Dantzig-Wolfe / perspective-cut reading.}
+$\Ptwo$ is precisely the \emph{Dantzig-Wolfe / simplicial-decomposition} bound:
+Frank-Wolfe generates the columns (the sub-Block vertices) and the ``master''
+recombines them with their \emph{true} costs. When $\conv(X_j)$ is the convex hull
+of the integer solutions of the sub-Block and $h_j$ is a convex-quadratic cost,
+$\Ptwo$ \emph{is} the value of the perspective reformulation / of the
+perspective-cut (P/C) bound of that sub-Block. In other words:
+\textbf{\code{FrankWolfeSolver} in mode $\Ptwo$ is a decomposition alternative to
+an explicit DW / P-C reformulation}, without having to write the master nor the
+columns by hand.
+
+\subsection{What changes in the algorithm}\label{sec:whatchanges}
+
+The crucial point --- and what makes the feature ``free'' --- is that
+\textbf{the oracle (LMO) is identical in the two modes}: it always returns
+vertices that account for the exact $h_j$. Only the value/gap/line-search
+\emph{bookkeeping} changes. In detail:
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Per-atom stored cost.} Each atom of the active set stores
+  $c_i = \sum_j h_j(\text{atom}_j)$, the child cost \emph{at the vertex}. The
+  children term of the current value is then
+  \[
+    \underbrace{\bar c = \sum_i \lambda_i\, c_i}_{\Ptwo\ (\code{eObjCvxComb})}
+    \qquad\text{versus}\qquad
+    \underbrace{\sum_j h_j(x_j)}_{\Pone\ (\code{eObjAtX})},
+  \]
+  and the current value is
+  $\mathrm{cost\_x} = (\text{the}\ \ip{g}{x}\ \text{piece}) + \big(\text{cvx}\,?\,
+  \bar c:\sum_j h_j(x_j)\big)$. For an \emph{aggregated} atom (merge of atoms when
+  the active set exceeds \code{intMaxAtoms}), $c_i$ is the convex combination of
+  the merged atoms' costs: it is the correct quantity for $\Ptwo$, already cached.
+
+\item \textbf{Line search.} Along the segment $x+\gamma(v-x)$:
+  \begin{itemize}[nosep]
+    \item in $\Ptwo$ the children term is \emph{linear in $\gamma$} (it
+      interpolates $c_i$ between the two atoms): the exact line search reduces to
+      the father-only quadratic case, in closed form,
+      \begin{equation}\label{eq:ls}
+        \gamma^\star = \clamp\!\Big(-\tfrac{\ip{\nabla F}{d}}{2Q},\,0,\,1\Big),\quad
+        d=v-x,\ \ Q=\tfrac12\ip{d}{A d},
+      \end{equation}
+      with $A$ the (static) father Hessian, \emph{cached} in \code{set\_Block};
+    \item in $\Pone$ the children term is $h_j\big(x_j(\gamma)\big)$,
+      \emph{quadratic (nonlinear) in $\gamma$} when $h_j$ is quadratic.
+  \end{itemize}
+
+\item \textbf{Different iterates, not just a different value.} Since the iterates
+  are driven by the line search, the two modes follow \emph{different
+  trajectories} and converge to the two different optima $\mathrm{val}\,\Pone$ and
+  $\mathrm{val}\,\Ptwo$: it is not a mere change of the reported value.
+
+\item \textbf{Gap and stopping criterion} use \texttt{cost\_x} consistent with the
+  mode; in $\Ptwo$ the exact-line-search ``gate'' is relaxed, because the model
+  along the segment is linear-in-the-weights.
+\end{enumerate}
+
+The parameter selecting the mode is:
+\begin{center}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\code{intCvxComb} & enum & solves & children term of the value\\
+\midrule
+1 & \code{eObjCvxComb} \emph{(default)} & $\Ptwo$ (DW / P-C) & $\bar c=\sum_i\lambda_i c_i$ (linear in $\gamma$)\\
+0 & \code{eObjAtX}                       & $\Pone$ (composite) & $\sum_j h_j(x_j)$ (nonlinear in $\gamma$)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{remark}
+Default \code{eObjCvxComb}: it is the stronger bound and the one matching the
+P/C, the primary use. v1 caveat: the \emph{exact} line search of $\Pone$ with a
+\emph{nonlinear} $h_j$ is not yet implemented (it would require solving a
+quadratic in the children term along the segment); in that case $\Pone$ falls back
+on the agnostic $2/(t+2)$ rule. For linear $h_j$ the two modes coincide
+(Proposition~\ref{prop:jensen}) and the issue does not arise.
+\end{remark}
+
+%==========================================================================%
+\section{The algorithmic scheme}\label{sec:algo}
+%==========================================================================%
+
+\paragraph{Variants (\code{intAlgorithm}).}
+\code{AlgVanilla} (0, no active set), \code{AlgAwayStep} (1, Away-step
+Frank-Wolfe) and \code{AlgBPCG} (2, Blended Pairwise Conditional Gradient). The
+two active-set variants maintain the set of \emph{atoms} (generated vertices) and
+their weights, and are bounded by \code{intMaxAtoms} via aggregation of the least
+active ones.
+
+\paragraph{LMO and parallelism.}
+Each iteration: the father gradient is extracted, \emph{scattered} onto the
+children's objectives (Sec.~\ref{sec:composite}), each child's \code{:Solver} is
+run (\code{run\_LMOs}) and the vertex $v_j$ is materialized via
+\code{get\_var\_solution}. The LMOs are independent across children:
+\code{intMaxThread} enables a persistent bulk-synchronous thread pool.
+
+\paragraph{Line search (\code{intLineSearch}).}
+\code{LSAuto} (exact if the father is quadratic, agnostic otherwise),
+\code{LSAgnostic} (the open-loop $2/(t+2)$ rule), \code{LSExact} (requires a
+quadratic total objective). The closed form \eqref{eq:ls} holds when the father is
+quadratic (\code{DQuadFunction} \emph{or} \code{QuadFunction}) and --- in mode
+$\Ptwo$ --- for any $h_j$ (the children term is linear in $\gamma$); the father's
+quadratic structure (diagonal $+$ off-diagonal) is cached in \code{set\_Block}.
+
+\paragraph{Convergence.} The guarantee is for the \emph{smooth} case
+(differentiable father). With a nondifferentiable father objective (e.g.\
+\code{PolyhedralFunction}) Frank-Wolfe runs but may not reach the optimum:
+\code{get\_lb}/\code{get\_ub} provide a valid bracket that may not close. This is
+consistent with the literature on the nonsmooth case~\cite{white93,bolte22,%
+thekum20,cheungli17}; no smoothing is implemented.
+
+%==========================================================================%
+\section{\code{Modification} handling and warm-start}\label{sec:mods}
+%==========================================================================%
+
+\code{FrankWolfeSolver} handles \emph{lazily} the \code{Modification} coming from
+the inner Blocks, keeping the cached structures consistent and warm-starting the
+active set / the iterate between one \code{compute()} and the next. The logic
+mirrors that of \code{LagBFunction}, but is simpler because
+\code{FrankWolfeSolver} is at the top of the chain: it \emph{consumes} the
+Modification, it does not re-translate them into \code{FunctionMod} for an external
+solver.
+
+\paragraph{Mechanics.}
+Between two \code{compute()} the external Modification are \emph{queued}.
+\code{process\_modifications()}, at the start of \code{compute()}, drains the queue
+and categorizes it. \code{inhibit\_Modification(true)} is reused as
+\emph{play\_dumb} \emph{only} around the algorithm and the restore: the scatter
+(and the final restore) change the children's objectives and generate
+``self-inflicted'' Modification to be ignored, but the inhibit discards only the
+new incoming ones, not the external queue already accumulated. At the end of
+\code{compute()} the children's objectives go back to the original $c_0$
+(\emph{restore-at-end}), so an external change acts on a clean state; at teardown
+the restore uses \code{eNoMod} (the other \code{:Solver} might no longer exist).
+
+\paragraph{Categorization (\code{LagBFunction}-style relax test).}
+\code{guts\_of\_process\_modifications} produces a \emph{bit-mask}, and --- as in
+\code{LagBFunction} --- feasibility is re-checked \emph{only} when the change can
+\emph{shrink} the region:
+\begin{itemize}[nosep]
+  \item \textbf{father objective} $\to$ re-cache of the quadratic structure; atoms
+        untouched;
+  \item \textbf{child objective} $\to$ re-snapshot of $c_0$ and recomputation of
+        the atoms' costs $c_i$, which are kept;
+  \item \textbf{structure} (\code{C05FunctionModVars}, \code{NBModification},
+        variable fixing) $\to$ full re-analysis $+$ drop of the active set;
+  \item \textbf{feasible region} (\code{RowConstraintMod}, \code{VariableMod},
+        \code{ConstraintMod}, \code{BlockModAD}, \code{BlockMod}) $\to$ \emph{0} if
+        it relaxes, \emph{check}/reset if it restricts.
+\end{itemize}
+Variable \emph{fixing} is routed to a \emph{reset} (not to the feasibility check):
+\code{ColVariable::is\_feasible()} checks sign/integrality but \emph{not} the
+fixing (a \emph{state}, not a constraint), so a check would not drop the atoms
+that violate it. As in \code{LagBFunction}'s TODO, the direction of a
+\code{RowConstraintMod} cannot be deduced without the previous value: that case is
+always re-checked.
+
+\paragraph{\code{intHandleMod}.}
+\code{eModReset} (default) always does the worst case (re-analysis $+$ drop of the
+active set on any change, no warm-start); \code{eModFine} updates only the affected
+cache and \emph{keeps the warm-start}.
+
+\paragraph{Warm-start.} If a previous \code{compute()} left an active set / iterate
+still valid, it restarts from there. Vanilla has no atoms (it cannot rebuild
+$\bar c$ exactly) but still reuses the iterate $x$, reinitializing
+$\bar c = C_{\mathrm{lit}}(x)$ (exact for linear children). The
+\code{feasibility\_check} (eModFine, region change) writes each atom, calls
+\code{is\_feasible()}, drops the infeasible ones and rebuilds $x$ from the
+survivors (a convex combination of feasible points $\Rightarrow$ feasible).
+\emph{Aggregate guard}: the $c_i$ of an aggregated atom is the convex combination
+of the costs of the (lost) merged vertices, not $h(\cdot)$ at the point; with a
+bounded active set and quadratic children a child-objective change cannot recompute
+it exactly, so the warm-start is discarded.
+
+\paragraph{Infeasibility propagation.} If an LMO returns \code{kInfeasible}, the
+product region is empty and \code{compute()} returns \code{kInfeasible}.
+
+%==========================================================================%
+\section{Novel elements}\label{sec:novelty}
+%==========================================================================%
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Two problems from a single decomposition (Sec.~\ref{sec:twoproblems}).}
+  The same oracle, the same scheme and the same vertices serve both the ``true''
+  composite objective $\Pone$ and the DW / perspective-cut bound $\Ptwo$, with
+  $\Ptwo\ge\Pone$, selectable by a single parameter and at zero oracle cost.
+  \code{FrankWolfeSolver} thus becomes a decomposition alternative to an explicit
+  DW / P-C reformulation.
+\item \textbf{Unified composite objective (Sec.~\ref{sec:composite}).} The three
+  semantics \code{LMOLinear}/\code{LMOQuad}/\code{LMOFull} are $(\alpha,\beta)$ of
+  a single scheme, with a single gap criterion \eqref{eq:gap} valid in all modes.
+  The oracle handles exactly the child's separable part $h_j$.
+\item \textbf{Lazy \code{Modification} handling with warm-start (Sec.~\ref{sec:mods}).}
+  Porting of \code{LagBFunction}'s machinery (relax test, play\_dumb,
+  restore-at-end) adapted to a solver at the top of the chain, with warm-start of
+  both the active set and the vanilla iterate, and infeasibility propagation.
+\item \textbf{``All configuration'' SMS++ integration.} The cross-check between
+  \code{FrankWolfeSolver} and a monolithic \code{:MILPSolver} on the same Block is
+  driven entirely by \code{Configuration} files: no assumption, in the test code,
+  about which \code{:Solver} are attached.
+\end{enumerate}
+
+%==========================================================================%
+\section{Experimental validation}\label{sec:valid}
+%==========================================================================%
+
+\paragraph{Cross-check $\Ptwo$ $=$ DPForm$+$P/C on \code{ThermalUnitBlock}.}
+On unit-commitment instances, the quadratic father over a \code{ThermalUnitBlock}
+with \code{ThermalUnitDPSolver} as LMO, in mode \code{LMOFull}$+$\code{eObjCvxComb}
+($\Ptwo$), produces \emph{the same bound} (up to tolerance) as a \code{MILPSolver}
+on the continuous-relaxed, cut-separated DP formulation with perspective cuts ---
+including the fractional-commitment cases where $\Pone\neq\Ptwo$. This empirically
+verifies the perspective-cut reading of $\Ptwo$ (Proposition~\ref{prop:jensen} and
+following).
+
+\paragraph{Randomized \code{Modification} on \code{MCFBlock}.}
+The \code{test-mcf} tester (in the style of \code{tests/MCF\_MILP}) builds $k$
+\code{MCFBlock} under a \code{DQuadFunction} father and, in randomized rounds,
+changes the \emph{costs} (an objective change), the \emph{capacities} (a region
+change) or \emph{fixes/unfixes} an arc (a \code{VariableMod} that shrinks/relaxes),
+cross-checking against a \code{:MILPSolver} at each round, including infeasibility
+propagation when closing an arc makes the MCF infeasible.
+
+\paragraph{Regression suite.}
+The regression (static $+$ \code{-M} rounds) runs vanilla / Away-step / BPCG, a
+bounded active set, parallel LMOs, the \code{PolyhedralFunction} father (two-Block
+bracket) and the region-\code{Modification} rounds on \code{MCFBlock}: all cases
+pass. The matrix (variants $\times$ \code{eModReset}/\code{eModFine} $\times$
+\code{DQuad}/\code{Quad}, and cost/cap/fix $\times$ seed $\times$ instances) is
+described in the tester README.
+
+%==========================================================================%
+\section{Parameters}\label{sec:params}
+%==========================================================================%
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Parameter & Values & Meaning\\
+\midrule
+\code{intLMOObj}    & 0/1/2 & \code{LMOLinear}/\code{LMOQuad}/\code{LMOFull} (Sec.~\ref{sec:composite})\\
+\code{intAlgorithm} & 0/1/2 & vanilla / Away-step / BPCG\\
+\code{intLineSearch}& 0/1/2 & auto / agnostic / exact\\
+\code{intMaxAtoms}  & $\ge 0$ & active-set bound (0 $=$ unbounded)\\
+\code{intCvxComb}   & 0/1 & \code{eObjAtX} ($\Pone$) / \code{eObjCvxComb} ($\Ptwo$, default)\\
+\code{intHandleMod} & 0/1 & \code{eModReset} (default) / \code{eModFine}\\
+\code{intMaxThread} & $\ge 1$ & parallel LMOs (default 1)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Example \code{ComputeConfig} (mode $\Ptwo$, Away-step, warm-start):
+\begin{lstlisting}[style=cfg]
+intAlgorithm   1     # Away-step Frank-Wolfe
+intLMOObj      2     # LMOFull: oracle handles c_j + g_j + q_j
+intCvxComb     1     # eObjCvxComb: solves (P2) = DW / perspective-cut
+intHandleMod   1     # eModFine: warm-start across consecutive compute()
+\end{lstlisting}
+
+%==========================================================================%
+\section{Conclusions and future work}\label{sec:concl}
+%==========================================================================%
+
+\code{FrankWolfeSolver} brings the Frank-Wolfe family into SMS++ as a
+decomposition \code{CDASolver}, integrated ``all by configuration''. The
+conceptual contribution is that a single decomposition, with the same oracle,
+solves \emph{two distinct problems} --- the composite objective over $\conv(X)$
+and its DW / perspective-cut relaxation $\Ptwo\ge\Pone$ --- separated by a single
+parameter and by the value/line-search bookkeeping alone, not by the oracle.
+Future work: the exact line search of $\Pone$ with nonlinear $h_j$; smoothing for
+the nonsmooth case; the full LDS-style forwarding of the per-child
+\code{BlockSolverConfig}; benchmarking $\Ptwo$ against explicit DW / P-C
+reformulations.
+
+%==========================================================================%
+\begin{thebibliography}{9}
+%==========================================================================%
+\bibitem{fwsurvey} G.~Braun, A.~Carderera, C.~W.~Combettes, H.~Hassani,
+  A.~Karbasi, A.~Mokhtari, S.~Pokutta.
+  \emph{Conditional Gradient Methods}. arXiv:2211.14103, 2022.
+\bibitem{fwjl} M.~Besan\c{c}on, A.~Carderera, S.~Pokutta.
+  \emph{FrankWolfe.jl: A High-Performance and Flexible Toolbox for Frank-Wolfe
+  Algorithms and Conditional Gradients}. INFORMS J. on Computing, 2022.
+\bibitem{white93} D.~J.~White. \emph{Extension of the Frank-Wolfe algorithm to
+  concave nondifferentiable objective functions}. J.~Optim.~Theory Appl., 1993.
+\bibitem{bolte22} J.~Bolte, C.~W.~Combettes, E.~Pauwels.
+  \emph{The Iterates of the Frank-Wolfe Algorithm May Not Converge}.
+  Mathematics of Operations Research, 2022.
+\bibitem{thekum20} K.~K.~Thekumparampil, P.~Jain, P.~Netrapalli, S.~Oh.
+  \emph{Projection Efficient Subgradient Method and Optimal Nonsmooth
+  Frank-Wolfe Method}. NeurIPS, 2020.
+\bibitem{cheungli17} E.~Cheung, Y.~Li. \emph{Nonsmooth Frank-Wolfe using Uniform
+  Affine Approximations}. 2017.
+\end{thebibliography}
+
+\end{document}

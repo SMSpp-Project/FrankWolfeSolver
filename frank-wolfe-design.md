@@ -134,7 +134,7 @@ lo stesso schema FW può calcolare due quantità diverse — *due problemi diver
 a seconda di come la parte `h_j` entra nel **valore** e nel **gap**. È una
 **feature qualificante** del solver, controllata da `intCvxComb`:
 
-- **(P1) — valore all'iterata** (`intCvxComb = eObjAtX = 0`, default):
+- **(P1) — valore all'iterata** (`intCvxComb = eObjAtX = 0`):
   ```
   F_P1(x) = f_father(x) + Σ_j h_j(x_j)
   ```
@@ -143,7 +143,8 @@ a seconda di come la parte `h_j` entra nel **valore** e nel **gap**. È una
   `conv(C_j)`, non un vertice). È il bound che si otterrebbe ottimizzando
   esattamente `F` sulla chiusura convessa della regione prodotto.
 
-- **(P2) — combinazione convessa / Dantzig-Wolfe** (`intCvxComb = eObjCvxComb = 1`):
+- **(P2) — combinazione convessa / Dantzig-Wolfe** (`intCvxComb = eObjCvxComb = 1`,
+  **default**):
   ```
   F_P2(x) = f_father(x) + Σ_j ( Σ_k λ_{jk} h_j(v_{jk}) )
   ```
