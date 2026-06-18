@@ -1,11 +1,11 @@
 /** @file
  * Configuration header for @modName@.
  *
- * \author Antonio Frangioni \n
+ * \author Niccolo' Iardella \n
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \copyright &copy; by Antonio Frangioni
+ * \copyright &copy; by Niccolo' Iardella
  */
 
 #ifndef __@modName@_CONFIG_H
