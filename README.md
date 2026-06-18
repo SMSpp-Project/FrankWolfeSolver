@@ -1,51 +1,73 @@
 # FrankWolfeSolver
 
 Definition and implementation of the `FrankWolfeSolver` class, which implements
-the `CDASolver` interface within the SMS++ framework for the Frank-Wolfe
-(conditional gradient) family of algorithms, ported as closely as possible from
-the Julia package [FrankWolfe.jl](https://github.com/ZIB-IOL/FrankWolfe.jl).
+the `CDASolver` interface within the SMS++ framework with a family of
+Frank-Wolfe (conditional gradient) type algorithms, ported as closely as
+possible from the Julia package
+[FrankWolfe.jl](https://github.com/ZIB-IOL/FrankWolfe.jl).
 
-`FrankWolfeSolver` attaches to a "father" `Block` having the following
+`FrankWolfeSolver` attaches to a "father" `Block` (B) with the following
 structure:
 
-- a `FRealObjective` whose `Function` is a `C05Function` (the "linking"
-  function, of which the diagonal linearization, i.e. the gradient, is used at
-  each iteration);
+- no `Variable` and no `Constraint` of its own: all the `Variable` (and
+  `Constraint`) belong to the sub-`Block`;
 
-- an arbitrary number of sub-`Block`, which contain *all* the `Variable` and
-  `Constraint` of the model (the father `Block` has none of its own);
+- (B) has a `FRealObjective` whose `Function` is a `C05Function` (the "linking"
+  function), of which the diagonal linearization, i.e., the gradient, is used;
 
-- each sub-`Block` has a `FRealObjective` whose `Function` is a
-  `LinearFunction`, a `DQuadFunction` or a `QuadFunction`.
+- an arbitrary number of sub-`Block`, each having a `FRealObjective` whose
+  `Function` is a `LinearFunction`, a `DQuadFunction` or a `QuadFunction`.
 
-To each sub-`Block` a `:Solver` acts as a Linear Minimization Oracle (LMO),
-i.e., it optimizes a linear function over the sub-`Block` feasible region. As
-for `LagrangianDualSolver` and its inner `Solver`, these LMO are not compile-time
-dependencies: they are obtained at run time through the `Solver` factory and the
-`CDASolver` interface. The overall feasible region that `FrankWolfeSolver`
-optimizes over is the product of the convex hulls of the sub-`Block` feasible
-regions (any integrality in the sub-`Block` being ignored).
+To each sub-`Block` a `:Solver` is registered that acts as a Linear Minimization
+Oracle (LMO): each Frank-Wolfe iteration computes the gradient of the father
+objective, scatters it into the sub-`Block` objectives, and asks each LMO to
+minimize the (modified) sub-`Block` objective over its feasible region. The
+overall feasible region is therefore the product of the *convex hulls* of the
+sub-`Block` feasible regions, so any integrality in a sub-`Block` is relaxed (the
+LMO is free to return integer vertices: `FrankWolfeSolver` minimizes over their
+convex hull). The solver is a `CDASolver` because Frank-Wolfe naturally produces,
+"for free", a dual (Lagrangian) solution: `get_dual_solution()` simply forwards
+to the dual solutions of the sub-`Block` LMO, which at (exact) termination are
+valid Lagrangian multipliers for (B).
 
-A qualifying feature of this solver is that, by the choice of a single
-algorithmic parameter (`intCvxComb`) and at essentially no extra oracle cost, it
-can solve either of two distinct problems over the same feasible set:
+The solver minimizes the "composite" objective
 
-- the genuine *composite* objective `f_father(x) + sum_j h_j(x_j)` over the
-  product of the convex hulls of the sub-`Block`;
+        F(x) = f_father(x) + sum_j h_j(x_j)
 
-- the stronger Dantzig-Wolfe / simplicial-decomposition (perspective-cut)
-  relaxation of it, in which each sub-`Block` cost is accounted as the convex
-  combination of the vertex costs, i.e. it is replaced by its convex envelope
-  over the generated vertices.
+over `X = prod_j conv(X_j)`, where `f_father` is the father objective
+(linearized each iteration) and `h_j` is the part of sub-`Block` j's objective
+kept exactly in its oracle. Three algorithmic variants are available
+(`intAlgorithm`): "vanilla" Frank-Wolfe, Away-step Frank-Wolfe and Blended
+Pairwise Conditional Gradient (the last two maintain an *active set* of atoms,
+optionally bounded by aggregation via `intMaxAtoms`); the line search
+(`intLineSearch`) is the exact one when the father objective is quadratic, the
+open-loop `2/(t+2)` rule otherwise.
 
-The two objectives agree on the vertices of the feasible region and coincide
-exactly when all sub-`Block` objectives are linear; otherwise the second one is
-the convex envelope of the first, hence a stronger (greater) bound. When the
-convex hull of a sub-`Block` is that of its integer solutions and its cost is a
-convex-quadratic, the second problem is exactly the perspective reformulation /
-perspective-cut bound of that sub-`Block`, so the solver can be used as a
-decomposition alternative to an explicit Dantzig-Wolfe / perspective-cut
-reformulation.
+## Two problems at no extra cost
+
+A qualifying feature of `FrankWolfeSolver` is that, by the choice of a single
+algorithmic parameter (`intCvxComb`) and at essentially no extra cost, it solves
+either of two distinct problems over the same feasible region `X`:
+
+- **(P1)** `min { f_father(x) + sum_j h_j(x_j) : x in X }` — the *genuine*
+  composite objective, with each sub-`Block` cost evaluated at the (generally
+  fractional) iterate `x_j`;
+
+- **(P2)** the *Dantzig-Wolfe / simplicial-decomposition* relaxation, where each
+  `h_j` is accounted as the convex combination of the costs of the oracle
+  vertices, i.e., it is replaced by its convex envelope over those vertices.
+
+The two coincide when the sub-`Block` objectives are linear; they differ for
+nonlinear (e.g. quadratic) `h_j`, where convexity gives `(P2) >= (P1)`, so (P2)
+is the *stronger* relaxation. When `conv(X_j)` is the convex hull of the integer
+solutions of a sub-`Block` and `h_j` is a convex-quadratic cost, (P2) is exactly
+the value of the perspective reformulation / perspective-cut (P/C) bound of that
+sub-`Block` — so `FrankWolfeSolver` can be used as a decomposition alternative to
+an explicit Dantzig-Wolfe / P/C reformulation. The oracle is identical in the two
+modes; only the value / gap / line-search bookkeeping differs, and the
+convex-combination value is linear in the step, hence obtained for free. See the
+documentation of `intCvxComb` (and the GENERAL NOTES of the class) for the full
+discussion, and [frank-wolfe-design.md](frank-wolfe-design.md) for the design.
 
 
 ## Getting started
@@ -57,9 +79,9 @@ These instructions will let you build `FrankWolfeSolver`.
 
 - [SMS++ core library](https://gitlab.com/smspp/smspp)
 
-It's not a build requirement but you will need one or more SMS++ `Solver`
-capable of acting as a Linear Minimization Oracle for the sub-`Block`, obtained
-at run time through the `Solver` factory.
+It's not a build requirement but you will need a SMS++ `:Solver` to register to
+each sub-`Block` as its LMO (e.g. an `MCFSolver` for an `MCFBlock`, a
+`ThermalUnitDPSolver` for a `ThermalUnitBlock`, or a generic `:MILPSolver`).
 
 
 ### Build and install with CMake
@@ -94,24 +116,15 @@ target_link_libraries(<my_target> SMS++::FrankWolfeSolver)
 ### Build and install with makefiles
 
 Carefully hand-crafted makefiles have also been developed for those unwilling
-to use CMake. Makefiles build the executable in-source (in the same directory
-tree where the code is) as opposed to out-of-source (in the copy of the
-directory tree constructed in the build/ folder) and therefore it is more
-convenient when having to recompile often, such as when developing/debugging
-a new module, as opposed to the compile-and-forget usage envisioned by CMake.
-
-Each executable using `FrankWolfeSolver` has to include a "main makefile" of
-the module, which typically is either [makefile-c](makefile-c) including all
-necessary libraries comprised the "core SMS++" one, or [makefile-s](makefile-s)
-including all necessary libraries but not the "core SMS++" one (for the common
-case in which this is used together with other modules that already include
-them). The makefiles in turn recursively include all the required other
-makefiles, hence one should only need to edit the "main makefile" for
-compilation type (C++ compiler and its options) and it all should be good to go.
-In case some of the external libraries are not at their default location, it
-should only be necessary to create the `../extlib/makefile-paths` out of the
-`extlib/makefile-default-paths-*` for your OS `*` and edit the relevant bits
-(commenting out all the rest).
+to use CMake. Each executable using `FrankWolfeSolver` has to include a "main
+makefile" of the module, which typically is either [makefile-c](makefile-c)
+including all necessary libraries comprised the "core SMS++" one, or
+[makefile-s](makefile-s) including all necessary libraries but not the "core
+SMS++" one (for the common case in which this is used together with other
+modules that already include them). The makefiles in turn recursively include
+all the required other makefiles, hence one should only need to edit the "main
+makefile" for compilation type (C++ compiler and its options) and it all should
+be good to go.
 
 Check the [SMS++ installation wiki](https://gitlab.com/smspp/smspp-project/-/wikis/Customize-the-configuration#location-of-required-libraries)
 for further details.
@@ -136,8 +149,6 @@ conduct, and the process for submitting merge requests to us.
 - **Antonio Frangioni**  
   Dipartimento di Informatica  
   Università di Pisa
-
-### Contributors
 
 
 ## License

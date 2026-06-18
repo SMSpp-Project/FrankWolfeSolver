@@ -9,7 +9,7 @@
 #    file that tells where the headers and library are. It will be different  #
 #    depending on a local build or an installed package.                      #
 #                                                                             #
-#                                Donato Meoli                                 #
+#                                Antonio Frangioni                            #
 #                         Dipartimento di Informatica                         #
 #                             Universita' di Pisa                             #
 # --------------------------------------------------------------------------- #

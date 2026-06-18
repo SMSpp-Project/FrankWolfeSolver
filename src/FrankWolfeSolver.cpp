@@ -4,9 +4,10 @@
 /** @file
  * Implementation of the FrankWolfeSolver class.
  *
- * v1 status: structure (set_Block), parameter system, dual-solution
- * forwarding and result accessors are implemented; the vanilla Frank-Wolfe
- * loop in compute() is not yet implemented.
+ * Implements the vanilla, Away-step and Blended-Pairwise Frank-Wolfe loops,
+ * the two-problems value bookkeeping (intCvxComb) and the lazy handling of
+ * Modification coming from the sub-Block (intHandleMod). See the class
+ * documentation and FrankWolfeSolver/frank-wolfe-design.md.
  *
  * \author Antonio Frangioni \n
  *         Dipartimento di Informatica \n
@@ -21,6 +22,8 @@
 #include "FrankWolfeSolver.h"
 
 #include "FRealObjective.h"
+
+#include "FRowConstraint.h"
 
 #include "LinearFunction.h"
 
@@ -62,7 +65,7 @@ SMSpp_insert_in_factory_cpp_0( FrankWolfeSolver );
 
 static const std::vector< std::string > FWSlv_int_pars_str = {
  "intLMOObj" , "intLineSearch" , "intLMOSlvr" , "intAlgorithm" , "intMaxAtoms" ,
- "intCvxComb"
+ "intCvxComb" , "intHandleMod"
  };
 
 /*--------------------------------------------------------------------------*/
@@ -77,6 +80,7 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_algorithm   = get_dflt_int_par( intAlgorithm );
  f_max_atoms   = get_dflt_int_par( intMaxAtoms );
  f_cvx_comb    = get_dflt_int_par( intCvxComb );
+ f_handle_mod  = get_dflt_int_par( intHandleMod );
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
  f_max_time    = get_dflt_dbl_par( dblMaxTime );
@@ -98,52 +102,12 @@ void FrankWolfeSolver::cleanup( void )
   if( d.lmo )
    d.lmo->set_id();
 
- // The restore is issued with eNoMod: the physical (abstract) coefficients are
- // set back to c0, but NO Modification is emitted/propagated. cleanup() runs
- // when FrankWolfeSolver detaches from the Block (typically at teardown), when
- // the other registered :Solver may already be gone; propagating an objective
- // change to them at that point is both useless and unsafe (it would notify a
- // possibly dangling observer). NOTE: for a sub-Block whose abstract objective
- // change is bridged to physical data (e.g. ThermalUnitBlock's per-period
- // costs), the physical data is therefore NOT restored on detach -- re-attach
- // (set_Block) re-snapshots c0, so this only matters if the bare sub-Block is
- // reused by a physical-data solver right after detaching, which the teardown
- // path does not do.
- const bool alpha = ( f_lmo_obj == LMOFull );
+ // restore the original sub-Block objective coefficients; quiet == true (no
+ // Modification issued) because cleanup() runs when detaching, typically at
+ // teardown, when the other registered :Solver may already be gone (see
+ // restore_objectives)
  if( f_modified )
-  for( auto & d : v_sb ) {
-   if( d.c0.empty() )
-    continue;
-   Index n = Index( d.c0.size() );
-
-   // restore exactly what scatter() touched: when LMOFull updated only a
-   // subset (the father-touched variables), restore that subset to c0 and
-   // leave the rest (which scatter never changed) alone -- mirroring the
-   // Subset path of scatter().
-   if( alpha && ( d.obj_idx.size() < std::size_t( n ) ) ) {
-    std::vector< Index > srt( d.obj_idx.begin() , d.obj_idx.end() );
-    std::sort( srt.begin() , srt.end() );
-    Function::Subset nms( srt.begin() , srt.end() );
-    Function::Vec_FunctionValue nc( srt.size() );
-    for( std::size_t k = 0 ; k < srt.size() ; ++k )
-     nc[ k ] = d.c0[ srt[ k ] ];
-    if( d.dq )
-     d.dq->modify_linear_coefficients( std::move( nc ) , std::move( nms ) ,
-                                       true , eNoMod );
-    else
-     d.lin->modify_coefficients( std::move( nc ) , std::move( nms ) , true ,
-                                 eNoMod );
-    continue;
-    }
-
-   Function::Vec_FunctionValue nc( d.c0 );
-   if( d.dq )
-    d.dq->modify_linear_coefficients( std::move( nc ) , Function::Range( 0 ,
-                                       n ) , eNoMod );
-   else
-    d.lin->modify_coefficients( std::move( nc ) , Function::Range( 0 , n ) ,
-                                eNoMod );
-   }
+  restore_objectives( true );
 
  v_sb.clear();
  f_grad.clear();
@@ -168,6 +132,67 @@ void FrankWolfeSolver::cleanup( void )
  f_value = 0;
  f_bound = 0;
  f_has_sol = false;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::restore_objectives( bool quiet )
+{
+ // set every sub-Block objective's linear coefficients back to its original
+ // snapshot c0, undoing the last scatter(). Called at the end of compute() (so
+ // the Block is left pristine between two solves and external Modification act
+ // on the original objectives) and by cleanup() at detach time.
+ //
+ // quiet == true issues no Modification (eNoMod): used at detach/teardown, when
+ // the other registered :Solver may already be gone, so propagating the change
+ // would be useless and unsafe (a possibly dangling observer). For a sub-Block
+ // whose abstract-objective change is bridged to physical data (e.g.
+ // ThermalUnitBlock), the physical data is then NOT restored -- harmless at
+ // teardown, and re-snapshotted by set_Block on a later re-attach.
+ //
+ // quiet == false issues the change normally: used at the end of compute(),
+ // when all the :Solver are alive, so the bridge (and the other :Solver) are
+ // correctly notified. FrankWolfeSolver itself ignores the resulting
+ // Modification because it is inhibited around this call (a self-inflicted
+ // change), see compute().
+ const ModParam par = quiet ? eNoMod : eModBlck;
+ const bool alpha = ( f_lmo_obj == LMOFull );
+
+ for( auto & d : v_sb ) {
+  if( d.c0.empty() )
+   continue;
+  Index n = Index( d.c0.size() );
+
+  // restore exactly what scatter() touched: when LMOFull updated only a subset
+  // (the father-touched variables), restore that subset to c0 and leave the
+  // rest (which scatter never changed) alone -- mirroring the Subset path of
+  // scatter()
+  if( alpha && ( d.obj_idx.size() < std::size_t( n ) ) ) {
+   std::vector< Index > srt( d.obj_idx.begin() , d.obj_idx.end() );
+   std::sort( srt.begin() , srt.end() );
+   Function::Subset nms( srt.begin() , srt.end() );
+   Function::Vec_FunctionValue nc( srt.size() );
+   for( std::size_t k = 0 ; k < srt.size() ; ++k )
+    nc[ k ] = d.c0[ srt[ k ] ];
+   if( d.dq )
+    d.dq->modify_linear_coefficients( std::move( nc ) , std::move( nms ) ,
+                                      true , par );
+   else
+    d.lin->modify_coefficients( std::move( nc ) , std::move( nms ) , true ,
+                                par );
+   continue;
+   }
+
+  Function::Vec_FunctionValue nc( d.c0 );
+  if( d.dq )
+   d.dq->modify_linear_coefficients( std::move( nc ) , Function::Range( 0 , n ) ,
+                                     par );
+  else
+   d.lin->modify_coefficients( std::move( nc ) , Function::Range( 0 , n ) ,
+                               par );
+  }
+
+ f_modified = false;
  }
 
 /*--------------------------------------------------------------------------*/
@@ -286,9 +311,22 @@ void FrankWolfeSolver::set_Block( Block * block )
   throw( std::invalid_argument(
    "FrankWolfeSolver: the father Block must have no Constraint of its own" ) );
 
+ // validate the father Objective and cache its (quadratic) structure, then
+ // scan the sub-Block (validate, snapshot c0, build the scatter map). These are
+ // factored out so they can be re-run by process_modifications() when a
+ // Modification from the sub-Block invalidates the cached information.
+
+ analyze_father();
+ analyze_subBlocks();
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::analyze_father( void )
+{
  // the father Objective must be a FRealObjective with a C05Function- - - - -
 
- f_obj = dynamic_cast< FRealObjective * >( block->get_objective() );
+ f_obj = dynamic_cast< FRealObjective * >( f_Block->get_objective() );
  if( ! f_obj )
   throw( std::invalid_argument(
    "FrankWolfeSolver: the father Block must have a FRealObjective" ) );
@@ -300,9 +338,40 @@ void FrankWolfeSolver::set_Block( Block * block )
 
  f_max = ( f_obj->get_sense() == Objective::eMax );
 
+ // the exact line search is available when the father Objective is quadratic
+ // (DQuadFunction or QuadFunction): cache its (static) quadratic structure,
+ // i.e. the diagonal a_p and, for a QuadFunction, the off-diagonal terms
+
+ f_dq_father = dynamic_cast< DQuadFunction * >( f_fun );  // DQuad or Quad
+ f_quad_father = dynamic_cast< QuadFunction * >( f_fun ); // Quad only
+
+ f_father_diag.clear();
+ f_father_offdiag.clear();
+
+ if( f_dq_father ) {
+  Index G = f_fun->get_num_active_var();
+  f_father_diag.resize( G );
+  for( Index p = 0 ; p < G ; ++p )
+   f_father_diag[ p ] = f_dq_father->get_quadratic_coefficient( p );
+
+  if( f_quad_father ) {
+   auto mat = f_quad_father->get_matrix();   // off-diagonal (lower half)
+   for( int k = 0 ; k < mat.outerSize() ; ++k )
+    for( QuadFunction::Qmat::InnerIterator it( mat , k ) ; it ; ++it )
+     if( it.row() != it.col() )
+      f_father_offdiag.emplace_back( Index( it.row() ) , Index( it.col() ) ,
+                                     it.value() );
+   }
+  }
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::analyze_subBlocks( void )
+{
  // there must be at least one sub-Block - - - - - - - - - - - - - - - - - - -
 
- const auto & sb = block->get_nested_Blocks();
+ const auto & sb = f_Block->get_nested_Blocks();
  f_nsb = Index( sb.size() );
  if( ! f_nsb )
   throw( std::invalid_argument(
@@ -311,6 +380,7 @@ void FrankWolfeSolver::set_Block( Block * block )
  // scan the sub-Block: validate the objectives, snapshot the original linear
  // coefficients, and record the position of each variable in its objective - -
 
+ v_sb.clear();
  v_sb.resize( f_nsb );
  std::unordered_map< Variable * , std::pair< Index , Index > > var2pos;
 
@@ -361,32 +431,22 @@ void FrankWolfeSolver::set_Block( Block * block )
 
  f_xval.resize( G );
  f_vval.resize( G );
+ }
 
- // the exact line search is available when the father Objective is quadratic
- // (DQuadFunction or QuadFunction): cache its (static) quadratic structure,
- // i.e. the diagonal a_p and, for a QuadFunction, the off-diagonal terms
+/*--------------------------------------------------------------------------*/
 
- f_dq_father = dynamic_cast< DQuadFunction * >( f_fun );  // DQuad or Quad
- f_quad_father = dynamic_cast< QuadFunction * >( f_fun ); // Quad only
-
- if( f_dq_father ) {
-  f_father_diag.resize( G );
-  for( Index p = 0 ; p < G ; ++p )
-   f_father_diag[ p ] = f_dq_father->get_quadratic_coefficient( p );
-
-  if( f_quad_father ) {
-   auto mat = f_quad_father->get_matrix();   // off-diagonal (lower half)
-   for( int k = 0 ; k < mat.outerSize() ; ++k )
-    for( QuadFunction::Qmat::InnerIterator it( mat , k ) ; it ; ++it )
-     if( it.row() != it.col() )
-      f_father_offdiag.emplace_back( Index( it.row() ) , Index( it.col() ) ,
-                                     it.value() );
-   }
+void FrankWolfeSolver::snapshot_c0( void )
+{
+ // re-read the original linear coefficients c0 of every sub-Block Objective,
+ // assuming the variable structure (hence the scatter map) is unchanged: used
+ // by the fine handling of a sub-Block-Objective Modification
+ for( auto & d : v_sb ) {
+  Index n = d.fun->get_num_active_var();
+  d.c0.resize( n );
+  for( Index i = 0 ; i < n ; ++i )
+   d.c0[ i ] = d.dq ? d.dq->get_linear_coefficient( i )
+                    : d.lin->get_coefficient( i );
   }
-
- // v1 assumes a static problem: ignore all Modification
-
- inhibit_Modification( true );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -402,6 +462,7 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
   case( intAlgorithm ):  f_algorithm = value;   return;
   case( intMaxAtoms ):   f_max_atoms = value;   return;
   case( intCvxComb ):    f_cvx_comb = value;    return;
+  case( intHandleMod ):  f_handle_mod = value;  return;
   case( intMaxThread ):         f_max_thread = value;  return;
   case( intMaxIter ):           f_max_iter = value;    return;
   default:                      CDASolver::set_par( par , value );
@@ -431,6 +492,7 @@ int FrankWolfeSolver::get_dflt_int_par( idx_type par ) const
   case( intAlgorithm ):  return( AlgVanilla );
   case( intMaxAtoms ):   return( 0 );
   case( intCvxComb ):    return( eObjCvxComb );
+  case( intHandleMod ):  return( eModReset );
   default:                      return( CDASolver::get_dflt_int_par( par ) );
   }
  }
@@ -446,6 +508,7 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intAlgorithm ):  return( f_algorithm );
   case( intMaxAtoms ):   return( f_max_atoms );
   case( intCvxComb ):    return( f_cvx_comb );
+  case( intHandleMod ):  return( f_handle_mod );
   case( intMaxThread ):         return( f_max_thread );
   case( intMaxIter ):           return( f_max_iter );
   default:                      return( CDASolver::get_int_par( par ) );
@@ -599,41 +662,316 @@ void FrankWolfeSolver::run_LMOs( bool changedvars )
  if( ( f_max_thread <= 1 ) || ( f_nsb <= 1 ) ) {
   for( auto & d : v_sb )
    run_one( d );
+  }
+ else {
+  // parallel path: each LMO runs on its own (distinct) sub-Block, with the
+  // FrankWolfeSolver identity lent to its :Solver (so lock( f_id ) on the
+  // already-f_id-owned sub-Block never contends); load-balanced via an atomic
+  // counter, the main thread participating. No shared mutable state: each LMO
+  // writes only into its own sub-Block and its own SubBlockData slot.
+
+  std::atomic< Index > next( 0 );
+  auto chunk = [ & ]() {
+   for( ; ; ) {
+    Index i = next.fetch_add( 1 );
+    if( i >= f_nsb )
+     break;
+    run_one( v_sb[ i ] );
+    }
+   };
+
+  int nthreads = std::min< int >( f_max_thread , int( f_nsb ) );
+  std::vector< std::thread > pool;
+  pool.reserve( nthreads - 1 );
+  for( int t = 1 ; t < nthreads ; ++t )
+   pool.emplace_back( chunk );
+  chunk();                                // the main thread participates
+  for( auto & th : pool )
+   th.join();
+
+  // re-throw (in the main thread) the first exception, if any
+  for( auto & d : v_sb )
+   if( d.excp ) {
+    auto e = d.excp;
+    d.excp = nullptr;
+    std::rethrow_exception( e );
+    }
+  }
+
+ // a sub-Block whose (relaxed) feasible region is empty makes the product
+ // region -- hence the father -- infeasible
+ f_lmo_infeas = false;
+ for( const auto & d : v_sb )
+  if( d.status == kInfeasible ) {
+   f_lmo_infeas = true;
+   break;
+   }
+ }
+
+/*--------------------------------------------------------------------------*/
+
+char FrankWolfeSolver::guts_of_process_modifications( const Modification * mod )
+ const
+{
+ // NBModification: the inner Block changed fundamentally -> full re-analysis
+ if( dynamic_cast< const NBModification * >( mod ) )
+  return( 4 );
+
+ // GroupModification: the union of what its sub-Modification require
+ if( const auto gm = dynamic_cast< const GroupModification * >( mod ) ) {
+  char w = 0;
+  for( const auto & sm : gm->sub_Modifications() )
+   w |= guts_of_process_modifications( sm.get() );
+  return( w );
+  }
+
+ // a change of the *active variables* of a Function (father or sub-Block
+ // Objective) changes the scatter map -> structural re-analysis
+ if( dynamic_cast< const C05FunctionModVarsAddd * >( mod ) ||
+     dynamic_cast< const C05FunctionModVarsRngd * >( mod ) ||
+     dynamic_cast< const C05FunctionModVarsSbst * >( mod ) ) {
+  const auto fm = static_cast< const FunctionMod * >( mod );
+  const auto f = fm->function();
+  if( f == f_fun )
+   return( 4 );
+  for( const auto & d : v_sb )
+   if( f == d.fun )
+    return( 4 );
+  return( 8 );  // vars of some other Function (e.g. a Constraint): feasibility
+  }
+
+ // a coefficient change of an Objective Function (no variable change)
+ if( const auto fm = dynamic_cast< const FunctionMod * >( mod ) ) {
+  const auto f = fm->function();
+  if( f == f_fun )
+   return( 1 );  // the father Objective changed
+  for( const auto & d : v_sb )
+   if( f == d.fun )
+    return( 2 );  // a sub-Block Objective changed
+
+  // a FunctionMod on some other Function: if it is the Function of an
+  // FRowConstraint and the change surely cannot *tighten* it, the active-set
+  // atoms stay feasible and no check is needed. This is the relax test of
+  // LagBFunction: a constraint lhs <= f(x) <= rhs whose f shifts by a known
+  // amount cannot be newly violated when shift > 0 and there is no upper bound
+  // (rhs == +INF), or shift < 0 and there is no lower bound (lhs == -INF).
+  if( const auto c =
+      dynamic_cast< const FRowConstraint * >( f->get_Observer() ) ) {
+   const auto sh = fm->shift();
+   const auto INF = Inf< FunctionValue >();
+   if( ( ! std::isnan( sh ) ) &&
+       ( ( ( sh > 0 ) && ( c->get_rhs() >=  INF ) ) ||
+         ( ( sh < 0 ) && ( c->get_lhs() <= -INF ) ) ) )
+    return( 0 );  // surely relaxing: nothing to do
+   }
+
+  return( 8 );    // may tighten the feasible region: re-check
+  }
+
+ // From here on, Modification that may change the *feasible region*: an
+ // active-set atom may have become infeasible. We mirror the "relax test" of
+ // LagBFunction, returning the feasibility bit (8) only when the change can
+ // tighten the region, and 0 when it surely cannot (the atoms stay feasible).
+
+ // VariableMod: a ColVariable changed status (fixed/unfixed, integrality, sign,
+ // unitary). The atoms stay feasible iff every attribute was either unchanged
+ // or *relaxed* (a restriction removed); a newly added restriction (e.g. the
+ // variable was *fixed*, or made integer/positive/negative/unitary) may exclude
+ // them. The per-attribute test "( curr == old ) || ( !curr && old )" is true
+ // exactly when that attribute was not newly added.
+ if( const auto tmod = dynamic_cast< const VariableMod * >( mod ) ) {
+  const auto xj = dynamic_cast< const ColVariable * >( tmod->variable() );
+  if( ! xj )
+   return( 8 );  // unknown Variable type: worst case
+  const auto os = tmod->old_state();
+  auto relaxed = []( bool curr , bool old ) { return( ( curr == old ) ||
+                                                      ( ! curr && old ) ); };
+  if( relaxed( xj->is_fixed()    , xj->is_fixed( os )    ) &&
+      relaxed( xj->is_integer()  , xj->is_integer( os )  ) &&
+      relaxed( xj->is_positive() , xj->is_positive( os ) ) &&
+      relaxed( xj->is_negative() , xj->is_negative( os ) ) &&
+      relaxed( xj->is_unitary()  , xj->is_unitary( os )  ) )
+   return( 0 );   // only relaxations / no change: atoms stay feasible
+
+  // a restriction was added (e.g. a variable was *fixed*, or made integer /
+  // positive). Block::is_feasible() checks the constraints and the variable
+  // sign/integrality, but NOT the fixing (which is a Variable *status*, not a
+  // constraint): an atom violating a new fixing would not be caught. We
+  // therefore conservatively re-analyze and drop the active set (4) rather than
+  // route it through the feasibility check (8).
+  return( 4 );
+  }
+
+ // RowConstraintMod: a constraint's LHS/RHS changed. The feasible region may
+ // shrink; the direction (an increase of RHS, or decrease of LHS, only relaxes)
+ // cannot be detected without the previous value (same limitation as
+ // LagBFunction), so we conservatively re-check.
+ if( const auto tmod = dynamic_cast< const RowConstraintMod * >( mod ) ) {
+  if( ( tmod->type() == RowConstraintMod::eChgLHS ) ||
+      ( tmod->type() == RowConstraintMod::eChgRHS ) ||
+      ( tmod->type() == RowConstraintMod::eChgBTS ) )
+   return( 8 );
+  }
+
+ // ConstraintMod: a Constraint was relaxed or enforced. Enforcing shrinks the
+ // feasible region (check); relaxing enlarges it (nothing to do).
+ if( const auto tmod = dynamic_cast< const ConstraintMod * >( mod ) )
+  return( tmod->type() == ConstraintMod::eEnforceConst ? 8 : 0 );
+
+ // BlockModAD: a dynamic Variable/Constraint was added/deleted. By the SMS++
+ // semantics (un-generated dynamic Variable are "there at their default", so
+ // generating one cannot make a feasible Solution infeasible; a fortiori
+ // deleting a dynamic Constraint cannot either), only *deleting a Variable* or
+ // *adding a Constraint* can shrink the feasible region.
+ if( const auto tmod = dynamic_cast< const BlockModAD * >( mod ) )
+  return( ( tmod->is_variable() && ( ! tmod->is_added() ) ) ||
+          ( ( ! tmod->is_variable() ) && tmod->is_added() ) ? 8 : 0 );
+
+ // any other Block change may arbitrarily violate feasibility -> re-check
+ if( dynamic_cast< const BlockMod * >( mod ) )
+  return( 8 );
+
+ // unrecognized Modification: take the safe route and re-check (more
+ // conservative than LagBFunction, which ignores it)
+ return( 8 );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::process_modifications( void )
+{
+ // drain the Modification queue (filled by add_Modification while the solver
+ // is not inhibited, i.e. between two compute()) and accumulate what changed
+ char what = 0;
+
+ while( f_mod_lock.test_and_set( std::memory_order_acquire ) )
+  ;
+ for( auto & mod : v_mod )
+  what |= guts_of_process_modifications( mod.get() );
+ v_mod.clear();
+ f_mod_lock.clear( std::memory_order_release );
+
+ if( ! what )
+  return;
+
+ // a structural change (variables / NBModification), or the conservative
+ // eModReset policy, re-analyzes everything from scratch and discards the warm
+ // start (the active set)
+ if( ( f_handle_mod == eModReset ) || ( what & 4 ) ) {
+  analyze_father();
+  analyze_subBlocks();
+  clear_active_set();
+  delete f_x;
+  f_x = nullptr;
+  f_has_sol = false;
   return;
   }
 
- // parallel path: each LMO runs on its own (distinct) sub-Block, with the
- // FrankWolfeSolver identity lent to its :Solver (so lock( f_id ) on the
- // already-f_id-owned sub-Block never contends); load-balanced via an atomic
- // counter, the main thread participating. No shared mutable state: each LMO
- // writes only into its own sub-Block and its own SubBlockData slot.
+ // eModFine, objective-only change: keep the active set warm-started (its atoms
+ // remain feasible), updating only the cached information they depend on.
 
- std::atomic< Index > next( 0 );
- auto chunk = [ & ]() {
-  for( ; ; ) {
-   Index i = next.fetch_add( 1 );
-   if( i >= f_nsb )
-    break;
-   run_one( v_sb[ i ] );
+ if( what & 1 )       // the father Objective changed -> re-cache its quadratic
+  analyze_father();   // structure; the atoms' values and costs are unaffected
+
+ if( what & 2 ) {     // a sub-Block Objective changed -> re-snapshot c0 and fix
+  snapshot_c0();      // up the (now stale) atom costs f_ci
+
+  // an *aggregate* atom's f_ci is the convex combination of the costs of the
+  // (now discarded) atoms it merged, not h() evaluated at its point: with a
+  // bounded active set (aggregation possible) and nonlinear sub-Block costs it
+  // cannot be recomputed exactly, so the warm start is dropped instead
+  bool any_quad = false;
+  for( const auto & d : v_sb )
+   if( d.dq ) { any_quad = true; break; }
+
+  if( ( f_max_atoms > 0 ) && any_quad ) {
+   clear_active_set();
+   delete f_x;
+   f_x = nullptr;
+   f_has_sol = false;
    }
-  };
+  else
+   recompute_atom_costs();
+  }
 
- int nthreads = std::min< int >( f_max_thread , int( f_nsb ) );
- std::vector< std::thread > pool;
- pool.reserve( nthreads - 1 );
- for( int t = 1 ; t < nthreads ; ++t )
-  pool.emplace_back( chunk );
- chunk();                                // the main thread participates
- for( auto & th : pool )
-  th.join();
+ if( ( what & 8 ) && f_has_sol )  // a sub-Block feasible region may have changed
+  feasibility_check();            // -> drop the atoms that became infeasible
+ }
 
- // re-throw (in the main thread) the first exception, if any
- for( auto & d : v_sb )
-  if( d.excp ) {
-   auto e = d.excp;
-   d.excp = nullptr;
-   std::rethrow_exception( e );
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::feasibility_check( void )
+{
+ // drop the active-set atoms that have become infeasible after a change of a
+ // sub-Block feasible region, then rebuild the iterate from the survivors. Each
+ // atom is a father Solution: write it into the Block and ask the father Block
+ // (which recurses into the sub-Block) whether it is feasible.
+ for( Index i = 0 ; i < f_aset.size() ; ) {
+  f_aset[ i ].f_sol->write( f_Block );
+  if( f_Block->is_feasible() )
+   ++i;
+  else {
+   delete f_aset[ i ].f_sol;
+   f_aset.erase( f_aset.begin() + i );
    }
+  }
+
+ if( ! f_aset.empty() ) {
+  // re-normalize the surviving weights to sum to 1 and rebuild the iterate
+  // x = sum_i lambda_i atom_i (a convex combination of feasible points, hence
+  // feasible)
+  double W = 0;
+  for( const auto & el : f_aset )
+   W += el.f_weight;
+  for( auto & el : f_aset )
+   el.f_weight /= W;
+
+  delete f_x;
+  f_x = nullptr;
+  for( const auto & el : f_aset )
+   if( ! f_x )
+    f_x = el.f_sol->scale( el.f_weight );
+   else
+    f_x->sum( el.f_sol , el.f_weight );
+  return;
+  }
+
+ // no surviving atom -- this is the only case for vanilla (which keeps no
+ // active set): keep the iterate itself if it is still feasible (warm start
+ // across a feasible-region change that did not exclude it), else cold restart
+ if( f_x ) {
+  f_x->write( f_Block );
+  if( ! f_Block->is_feasible() ) {
+   delete f_x;
+   f_x = nullptr;
+   f_has_sol = false;
+   }
+  }
+ else
+  f_has_sol = false;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::recompute_atom_costs( void )
+{
+ // recompute each active-set atom's sub-Block cost f_ci = sum_j h_j(atom_j)
+ // after a change of the sub-Block objectives. Between two compute() the
+ // sub-Block objectives are at their original c0 (the per-iteration scatter is
+ // undone), so writing the atom's father Solution into the Block and evaluating
+ // each sub-Block Objective yields exactly the (new) sum_j h_j(atom_j).
+ for( auto & a : f_aset ) {
+  a.f_sol->write( f_Block );
+  OFValue ci = 0;
+  for( auto & d : v_sb ) {
+   d.fun->compute( true );
+   ci += d.fun->get_value();
+   }
+  a.f_ci = ci;
+  }
+
+ // the iterate f_x is left as is (it is a convex combination of the same atoms,
+ // still feasible); only its associated value will be recomputed next compute()
  }
 
 /*--------------------------------------------------------------------------*/
@@ -649,6 +987,11 @@ int FrankWolfeSolver::compute( bool changedvars )
  if( ( ! owned ) && ( ! f_Block->lock( f_id ) ) )
   return( kBlockLocked );
 
+ // process any Modification arrived from the sub-Block since the last
+ // compute() (lazily), possibly rebuilding the cached structure, *before*
+ // acquiring the LMO (a structural change rebuilds v_sb)
+ process_modifications();
+
  acquire_LMOs();
 
  // LMOLinear requires purely linear sub-Block objectives (no quadratic term
@@ -660,8 +1003,32 @@ int FrankWolfeSolver::compute( bool changedvars )
     throw( std::logic_error( "FrankWolfeSolver: LMOLinear requires "
      "LinearFunction sub-Block objectives; use LMOQuad/LMOFull otherwise" ) );
 
- int status = ( f_algorithm == AlgVanilla ) ? compute_vanilla( changedvars )
-                                            : compute_active_set( changedvars );
+ // inhibit while running: the scatter() (and the final restore_objectives())
+ // change the sub-Block objectives, which are "self-inflicted" Modification to
+ // be ignored; external Modification queued meanwhile are kept (inhibit only
+ // drops new incoming ones)
+ inhibit_Modification( true );
+
+ int status;
+ try {
+  status = ( f_algorithm == AlgVanilla ) ? compute_vanilla( changedvars )
+                                         : compute_active_set( changedvars );
+  }
+ catch( ... ) {
+  if( f_modified )
+   restore_objectives( false );
+  inhibit_Modification( false );
+  if( ! owned )
+   f_Block->unlock( f_id );
+  throw;
+  }
+
+ // leave the Block pristine between two solves: undo the last scatter so any
+ // external change to the sub-Block objectives is "clean" (issued normally, so
+ // the bridge / the other :Solver are notified; ignored by us, being inhibited)
+ if( f_modified )
+  restore_objectives( false );
+ inhibit_Modification( false );
 
  if( ! owned )
   f_Block->unlock( f_id );
@@ -751,20 +1118,37 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    s += f_grad[ p ] * val[ p ];
   return( s ); };
 
- // initialization: a first LMO at the current point gives x0 = v0; the convex
- // combination of sub-Block costs starts at the cost of that single vertex,
- // cbar = sum_j h_j(v0_j) = mv_init - <g,v0> (the x-independent part)
- evaluate_gradient();
- scatter();
- run_LMOs( true );
- OFValue mv_init = 0;
- for( auto & d : v_sb )
-  mv_init += d.value;
- delete f_x;
- f_x = f_Block->get_Solution( nullptr , false );
- capture_father_values( f_vval );
- OFValue cbar = mv_init - grad_dot( f_vval );    // sum_j h_j(v0_j)
- f_has_sol = true;
+ // initialization. Warm start: if a previous compute() left a (still feasible)
+ // iterate -- which process_modifications keeps across an objective-only change
+ // and drops on a structural/feasibility change -- reuse it as x0; the loop
+ // below re-optimizes from it. The convex-combination cost cbar is reseeded to
+ // the cost evaluated at x0: exact for linear sub-Block objectives (where cbar
+ // == the re-evaluation), and washed out by the open-loop weights otherwise.
+ // Cold start: a first LMO at the current point gives x0 = v0 and
+ // cbar = sum_j h_j(v0_j) = mv_init - <g,v0> (the x-independent part).
+ OFValue cbar;
+ if( f_has_sol && f_x ) {
+  f_x->write( f_Block );
+  cbar = 0;                          // cbar = sum_j h_j(x0) at the warm iterate
+  for( auto & d : v_sb ) {
+   d.fun->compute( true );
+   cbar += d.fun->get_value();
+   }
+  }
+ else {
+  evaluate_gradient();
+  scatter();
+  run_LMOs( true );
+  if( f_lmo_infeas ) { f_has_sol = false; return( kInfeasible ); }
+  OFValue mv_init = 0;
+  for( auto & d : v_sb )
+   mv_init += d.value;
+  delete f_x;
+  f_x = f_Block->get_Solution( nullptr , false );
+  capture_father_values( f_vval );
+  cbar = mv_init - grad_dot( f_vval );          // sum_j h_j(v0_j)
+  f_has_sol = true;
+  }
 
  int status = kStopIter;
 
@@ -781,6 +1165,7 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   capture_father_values( f_xval );
 
   run_LMOs( true );
+  if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
   OFValue mv_sum = 0;
   for( auto & d : v_sb )
    mv_sum += d.value;                            // sum_j M_j(v_j)
@@ -872,24 +1257,31 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
    s += f_grad[ p ] * val[ p ];
   return( s ); };
 
- // initialization: a first LMO gives x0 = v0; active set = { ( v0 , 1 ) }
- evaluate_gradient();
- scatter();
- run_LMOs( true );
- OFValue mv_init = 0;
- for( auto & d : v_sb )
-  mv_init += d.value;
- clear_active_set();
- delete f_x;
- f_x = f_Block->get_Solution( nullptr , false );                 // x = v0
- { Atom a0;
-   a0.f_sol = f_Block->get_Solution( nullptr , false );
-   a0.f_weight = 1;
-   a0.f_count = 1;
-   capture_father_values( a0.f_val );
-   a0.f_ci = mv_init - grad_dot( a0.f_val );    // <c, v0> ( x-independent )
-   f_aset.push_back( std::move( a0 ) ); }
- f_has_sol = true;
+ // initialization: a first LMO gives x0 = v0; active set = { ( v0 , 1 ) }.
+ // Warm start: if a previous compute() left a valid active set (which
+ // process_modifications keeps across an objective-only Modification, fixing
+ // up the atom costs f_ci), reuse it -- the loop below re-optimizes from the
+ // current iterate. Otherwise (re)initialize from a single fresh LMO vertex.
+ if( ! ( f_has_sol && f_x && ( ! f_aset.empty() ) ) ) {
+  evaluate_gradient();
+  scatter();
+  run_LMOs( true );
+  if( f_lmo_infeas ) { f_has_sol = false; return( kInfeasible ); }
+  OFValue mv_init = 0;
+  for( auto & d : v_sb )
+   mv_init += d.value;
+  clear_active_set();
+  delete f_x;
+  f_x = f_Block->get_Solution( nullptr , false );                // x = v0
+  { Atom a0;
+    a0.f_sol = f_Block->get_Solution( nullptr , false );
+    a0.f_weight = 1;
+    a0.f_count = 1;
+    capture_father_values( a0.f_val );
+    a0.f_ci = mv_init - grad_dot( a0.f_val );   // <c, v0> ( x-independent )
+    f_aset.push_back( std::move( a0 ) ); }
+  f_has_sol = true;
+  }
 
  std::vector< FunctionValue > a_val;   // away-atom father values
 
@@ -931,6 +1323,7 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
 
   // FW vertex: the LMO of grad F
   run_LMOs( true );
+  if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
   OFValue mv_sum = 0;
   for( auto & d : v_sb )
    mv_sum += d.value;                            // <grad F, v>
