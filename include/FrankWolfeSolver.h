@@ -190,6 +190,14 @@ class FrankWolfeSolver : public CDASolver
   eObjCvxComb = 1   ///< sub-Block cost as the convex combination of vertex costs
   };
 
+ /// how Modification from the sub-Block are handled (value of intHandleMod)
+ enum handle_mod_type {
+  eModReset = 0 , ///< any sub-Block Modification triggers a full re-analysis of
+                  ///< the cached structure (simple, always correct)
+  eModFine  = 1   ///< categorize each Modification and update only the affected
+                  ///< cached information (cheaper, keeps more across re-solves)
+  };
+
 /** @} ---------------------------------------------------------------------*/
 /*--------------------- PUBLIC PARAMETERS ----------------------------------*/
 /*--------------------------------------------------------------------------*/
@@ -278,6 +286,33 @@ class FrankWolfeSolver : public CDASolver
    * agnostic 2/(t+2) rule, so eObjCvxComb (the default) is the mode to use for
    * nonlinear sub-Block objectives. An exact at-iterate line search for the
    * nonlinear case is future work. */
+
+  intHandleMod ,
+  ///< how to handle Modification coming from the sub-Block
+  /**< Selects how the solver reacts to a Modification coming from a sub-Block
+   * (or the father Objective), one of the handle_mod_type values. The solver
+   * processes the queued Modification lazily, at the beginning of each
+   * compute(); between two compute() the sub-Block objectives are left in their
+   * original state (the per-iteration scatter is undone at the end of
+   * compute()), so that any external change to them is "clean".
+   *
+   * - eModReset (default): any such Modification triggers a full re-analysis of
+   *   the cached structure (the sub-Block objective snapshots, the
+   *   gradient-to-sub-Block scatter map, the father quadratic cache). Simple
+   *   and always correct.
+   *
+   * - eModFine: each Modification is categorized and only the affected cached
+   *   information is rebuilt --- a father-Objective change re-caches the father
+   *   quadratic structure only; a sub-Block-Objective change re-snapshots its
+   *   linear coefficients only; a change of the *variables* (or an
+   *   NBModification) still triggers a full re-analysis; a change to the
+   *   sub-Block feasible region needs no action here (the active set is rebuilt
+   *   from scratch each compute()).
+   *
+   * Note: the finer handling becomes more valuable once the active set is
+   * warm-started across compute() (so that atoms persist and may need a
+   * feasibility re-check); v1 cold-starts each compute(), so the two modes
+   * differ only in how much of the (cheap) structural cache is rebuilt. */
 
   intLastParFWSlv  ///< first allowed parameter value for derived classes
   };
@@ -461,6 +496,38 @@ class FrankWolfeSolver : public CDASolver
  /// release everything acquired in set_Block and restore the sub-Block objectives
  void cleanup( void );
 
+ /// (re)validate the father Objective and (re)cache its quadratic structure
+ void analyze_father( void );
+
+ /// (re)scan the sub-Block: validate, snapshot c0, build the scatter map
+ void analyze_subBlocks( void );
+
+ /// re-read the original linear coefficients c0 of every sub-Block Objective
+ /// (assumes the variable structure is unchanged)
+ void snapshot_c0( void );
+
+ /// recompute the cached sub-Block cost f_ci of every active-set atom after a
+ /// sub-Block-Objective change (used to keep the active set warm-started)
+ void recompute_atom_costs( void );
+
+ /// drop the active-set atoms that have become infeasible (after a change of a
+ /// sub-Block feasible region), rebuilding the iterate from the survivors;
+ /// resets the warm start if no atom survives
+ void feasibility_check( void );
+
+ /// restore the original sub-Block objective coefficients (c0); quiet == true
+ /// issues no Modification (for teardown), else the change is propagated
+ void restore_objectives( bool quiet );
+
+ /// process the Modification queued from the sub-Block (lazily, at compute());
+ /// categorizes them and rebuilds the affected cached information
+ void process_modifications( void );
+
+ /// categorize a single Modification: returns a bit-mask, 0 = harmless,
+ /// 1 = father Objective changed, 2 = a sub-Block Objective changed,
+ /// 4 = structural change (variables/NBModification) -> full re-analysis
+ char guts_of_process_modifications( const Modification * mod ) const;
+
  /// acquire, for each sub-Block, the LMO :Solver at index intLMOSlvr
  void acquire_LMOs( void );
 
@@ -512,6 +579,7 @@ class FrankWolfeSolver : public CDASolver
  int f_algorithm;      ///< intAlgorithm
  int f_max_atoms;      ///< intMaxAtoms
  int f_cvx_comb;       ///< intCvxComb (eObjAtX / eObjCvxComb)
+ int f_handle_mod;     ///< intHandleMod (eModReset / eModFine)
  int f_max_thread;     ///< intMaxThread
  int f_max_iter;       ///< intMaxIter
  double f_max_time;    ///< dblMaxTime
