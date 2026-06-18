@@ -127,6 +127,58 @@ l'`active_set_argminmax` vanno definiti rispetto alla sola parte smooth
 classico pulito è `LMOLinear`. La line search esatta resta in forma chiusa se
 *sia* il padre *sia* le `q_j` sono quadratiche (l'Hessiano totale è la somma).
 
+### 2.bis I due problemi: valore all'iterata vs combinazione convessa (`intCvxComb`)
+
+Quando i figli hanno una f.o. **non lineare** (`h_j` con `β=1`, modo `LMOFull`),
+lo stesso schema FW può calcolare due quantità diverse — *due problemi diversi* —
+a seconda di come la parte `h_j` entra nel **valore** e nel **gap**. È una
+**feature qualificante** del solver, controllata da `intCvxComb`:
+
+- **(P1) — valore all'iterata** (`intCvxComb = eObjAtX = 0`, default):
+  ```
+  F_P1(x) = f_father(x) + Σ_j h_j(x_j)
+  ```
+  si minimizza la f.o. composita *vera* sull'inviluppo convesso `conv(C)`: `h_j`
+  è valutata **nell'iterate corrente** `x_j` (che è un punto interno di
+  `conv(C_j)`, non un vertice). È il bound che si otterrebbe ottimizzando
+  esattamente `F` sulla chiusura convessa della regione prodotto.
+
+- **(P2) — combinazione convessa / Dantzig-Wolfe** (`intCvxComb = eObjCvxComb = 1`):
+  ```
+  F_P2(x) = f_father(x) + Σ_j ( Σ_k λ_{jk} h_j(v_{jk}) )
+  ```
+  `h_j` è la **combinazione convessa dei costi nei vertici** `v_{jk}` dell'active
+  set (i `λ_{jk}` sono i pesi FW), cioè l'**inviluppo convesso** di `h_j` ristretto
+  ai vertici generati. È esattamente il bound di **decomposizione di
+  Dantzig-Wolfe / simplicial decomposition**, e — quando `conv(C_j)` è l'inviluppo
+  convesso intero del figlio — coincide con il **bound di perspective/Perspective-
+  Cut** (P/C) che la formulazione DP rilassata-continua cut-separata calcola.
+
+**Relazione.** Per la disuguaglianza di Jensen (`h_j` convessa, `x_j = Σ_k λ_{jk}
+v_{jk}`): `F_P2(x) ≥ F_P1(x)`, con **uguaglianza per figli lineari** (`q_j=0`):
+in quel caso `h_j` è lineare, la combinazione convessa dei costi-vertice *è*
+`h_j(x_j)`, e i due problemi coincidono. La differenza è puramente nel termine
+non-lineare dei figli.
+
+**Cosa cambia nell'algoritmo** (tutto il resto è identico — **stessa LMO**, stessi
+vertici, stessa direzione):
+- **bookkeeping del costo `f_ci`**: ogni atomo memorizza `c_i = Σ_j h_j(atom_j)`,
+  il costo-figlio *nel vertice*; il termine-figlio del valore corrente è allora
+  `cbar = Σ_i λ_i c_i` (P2) invece di `Σ_j h_j(x_j)` (P1). `cost_x = ⟨g..⟩-pezzo +
+  (cvx ? cbar : Σ h_j(x_j))`.
+- **line search**: in P2 il termine-figlio è **lineare in γ** lungo `x+γ(v−x)`
+  (interpola `c_i` tra i due atomi), in P1 è **quadratico** (è `h_j` valutata in
+  un punto che si muove). Quindi la line search esatta e il valore lungo il
+  segmento differiscono, **e di conseguenza differiscono le iterate** generate.
+- **gap / criterio d'arresto**: usano `cost_x` coerente col modo; in P2 il gate
+  della line search esatta è rilassato (il modello è lineare-nei-pesi).
+
+In sintesi: **stesso oracolo, stesso schema, due funzioni-valore diverse** → P2 ≥
+P1, e P2 è il ponte formale tra Frank-Wolfe e Dantzig-Wolfe / Perspective-Cut.
+Questo è ciò che ha permesso di validare `FrankWolfeSolver` (modo P2/`LMOFull`)
+contro `MILPSolver`+DPForm+P/C su `ThermalUnitBlock`: stesso bound a meno di
+tolleranza, anche nel caso di commitment frazionario in cui `P1 ≠ P2`.
+
 ---
 
 ## 3. Estrazione del gradiente e scatter sui figli
@@ -419,18 +471,73 @@ Due cose si tengono comunque, gratis e corrette:
 
 ---
 
-## 8. Modification (plumbing in v1, dettaglio post-v1)
+## 8. Modification e warm-start (implementato)
 
-`add_Modification` → coda → `process_outstanding_Modification()` in `compute()`
-(pattern LDS, con `flatten_Modification_list` per i `GroupModification`).
+`FrankWolfeSolver` gestisce **lazy** le `Modification` provenienti dagli inner
+Block, mantenendo coerenti le strutture cache e **warm-startando** active set /
+iterata tra una `compute()` e l'altra. La logica ricalca `LagBFunction`, ma è più
+semplice perché `FrankWolfeSolver` è in cima alla catena: **consuma** le
+Modification, non le ri-traduce in `FunctionMod` per un solver esterno.
 
-In v1 si mette la *plumbing* e si **invalidano** le strutture cache (mappa
-gradiente↔figli, snapshot f.o., active set quando ci sarà) sui cambi rilevanti;
-il trattamento incrementale fine (add/remove di variabili nella `C05Function`
-del padre o nelle f.o. dei figli) è rimandato e discusso a parte. Va gestito il
-fatto che lo scatter del gradiente emette `Modification` che risalgono al padre
-e quindi a `FrankWolfeSolver` stesso: vanno riconosciute e ignorate (come fa
-LDS per le proprie).
+**Meccanica.**
+- Niente `inhibit` globale fra due `compute()`: le Modification esterne si
+  **accodano** in `v_mod`.
+- `process_modifications()`, a inizio `compute()`, drena la coda e la categorizza.
+- `inhibit_Modification(true)` riusato come `play_dumb` **solo attorno
+  all'algoritmo e al restore**: lo scatter (e il restore finale) cambiano le f.o.
+  dei figli e generano Modification "self-inflicted" da ignorare; l'inhibit scarta
+  solo quelle nuove in arrivo, **non** la coda esterna già accumulata.
+- **Restore-at-end**: a fine `compute()` le f.o. dei figli tornano al `c0`
+  originale (`restore_objectives`), così un cambio esterno fra due solve agisce su
+  uno stato pulito e il re-snapshot di `c0` è corretto. A teardown il restore usa
+  `eNoMod` (gli altri `:Solver` potrebbero non esserci più — vedi nota sul crash
+  di teardown).
+
+**Categorizzazione** (`guts_of_process_modifications` → bit-mask), che ricalca la
+*relax test* di LagBFunction (si ricontrolla la fattibilità solo quando il cambio
+può *restringere* la regione):
+- **f.o. padre** (bit 1) → re-cache della struttura quadratica (`analyze_father`);
+  atomi intatti (valori e costi non cambiano).
+- **f.o. figlio** (bit 2) → re-snapshot `c0` (`snapshot_c0`) + ricalcolo dei costi
+  `f_ci` degli atomi (`recompute_atom_costs`), che vengono tenuti.
+- **struttura** (bit 4) — `C05FunctionModVars` sull'obiettivo, `NBModification`,
+  *fissaggio* di variabile → re-analisi completa + drop dell'active set.
+- **regione ammissibile** (bit 8) — `RowConstraintMod` (LHS/RHS) → check;
+  `VariableMod` (segno/integralità), `ConstraintMod` (enforce), `BlockModAD`
+  (del-var / add-constraint) → `0` se *rilassa*, `8`/`4` se *restringe*; `BlockMod`
+  generico → check.
+- **Fissaggio di variabili**: instradato al **reset** (bit 4), non a 8.
+  `ColVariable::is_feasible()` verifica segno/integralità ma **non** il fissaggio
+  (uno *stato*, non un vincolo), quindi un feasibility-check non scarterebbe gli
+  atomi che lo violano → serve il reset.
+- *Nota* (come nel TODO di LagBFunction): la direzione di un `RowConstraintMod`
+  (es. RHS che cresce su `≤` → rilassa) **non** è deducibile senza il valore
+  precedente, quindi quel caso si ricontrolla sempre.
+
+**Parametro `intHandleMod`** (`eModReset` default / `eModFine`): `eModReset` fa
+sempre il caso pessimo (re-analisi completa + drop dell'active set su qualunque
+cambio, nessun warm-start); `eModFine` aggiorna solo la cache interessata e
+**conserva il warm-start**.
+
+**Warm-start** (in `compute_active_set` e `compute_vanilla`): se una `compute()`
+precedente ha lasciato active set / iterata ancora validi (cosa che
+`process_modifications` garantisce sui cambi di sola f.o.), si riparte da lì.
+Vanilla non ha atomi (non può ricostruire `cbar` esatto), ma riusa comunque
+l'iterata `f_x` reinizializzando `cbar = C_lit(f_x)` (esatto per figli lineari,
+"lavato via" dai pesi open-loop altrimenti).
+
+**`feasibility_check`** (eModFine, cambio di regione): scrive ogni atomo, chiama
+`f_Block->is_feasible()`, scarta gli inammissibili e ricostruisce `f_x` dai
+sopravvissuti (combinazione convessa di punti ammissibili → ammissibile); per
+vanilla verifica direttamente `f_x` e lo tiene se ancora ammissibile, altrimenti
+cold restart. **Guard sugli aggregati**: il `f_ci` di un atomo aggregato è la
+combinazione convessa dei costi dei vertici fusi (persi), non `h()` nel punto; con
+active set limitato (`intMaxAtoms>0`) e figli quadratici un cambio-f.o.-figlio non
+lo può ricalcolare esattamente → in quel caso si scarta il warm-start.
+
+**Propagazione dell'infeasibility**: se una LMO ritorna `kInfeasible` la regione
+prodotto è vuota → `compute()` ritorna `kInfeasible` (`run_LMOs` setta
+`f_lmo_infeas`, controllato nel loop e all'init).
 
 ---
 
@@ -479,10 +586,11 @@ non si applica).
 
 ## 10. Test
 
-**Posizione**: `tests/FrankWolfeSolver_<base>` (uno per tipo di Block base),
-ricalcando `tests/LagrangianDualSolver_{MMCF,UC,Box}` — da cui si copia a man
-bassa (`test.cpp`, `makefile`, config `*.txt`, batch). Stanno in `tests/` perché
-dipendono dai Block base e dai loro `:Solver`, non dipendenze strette di
+**Posizione**: un'unica directory `tests/FrankWolfeSolver/` (scaffolding condiviso
+in `fw_test_common.h`, vedi "Tester implementati"), ricalcando
+`tests/LagrangianDualSolver_{MMCF,UC,Box}` — da cui si copia a man bassa
+(`test.cpp`, `makefile`, config `*.txt`, batch). Sta in `tests/` perché dipende
+dai Block base e dai loro `:Solver`, non dipendenze strette di
 `FrankWolfeSolver`.
 
 Ogni tester costruisce un Block padre con f.o. semplice
@@ -538,18 +646,50 @@ responsabilità di chi scrive il file di config che il Solver sia corretto:
 altrimenti si tira eccezione. `PolyhedralFunction` come f.o. del padre è un buon
 caso non-quadratico (LMO puramente lineare, line search Agnostic).
 
+### Tester implementati
+
+Un'unica directory `tests/FrankWolfeSolver/`, con scaffolding condiviso in
+`fw_test_common.h` (namespace `fwtest`: `build_father`, `make_father_objective`,
+`generate_poly`, `collect_vars`, `rnd`/`pos`), e **due** tester che si dividono
+sull'asse "indipendenza dal tipo di Block":
+
+- **`test.cpp` (generico, Block-agnostico)** — costruisce un padre con f.o.
+  `DQuad`/`Quad`/`Polyhedral` sopra `-k` figli (di qualunque tipo, da CLI/config)
+  e cross-checka `FrankWolfeSolver` contro il solver di confronto. Con **`-M`**
+  esegue round randomici di Modification **della sola f.o.** (padre, ed
+  eventualmente del primo figlio), che si esprimono attraverso la `FRealObjective`
+  astratta e quindi **non** richiedono di conoscere il tipo del Block. Esercita la
+  branch *cambio-f.o.* di `process_modifications` (re-snapshot `c0`, ricalcolo
+  `f_ci`) e il warm-start, sia vanilla che active-set, sia `eModReset` che
+  `eModFine`.
+
+- **`test-mcf.cpp` (MCF-specifico)** — esercita i cambi della **regione
+  ammissibile**, che intrinsecamente richiedono di conoscere il tipo: costruisce
+  `-k` `MCFBlock` sotto un padre `DQuad`, e in round randomici (stile
+  `tests/MCF_MILP`) cambia **costi** (`chg_costs` → cambio f.o.), **capacità**
+  (`chg_ucaps` → cambio regione) o **fissa/sfissa** un arco (chiusura/riapertura =
+  `VariableMod` che restringe/rilassa), sempre con `eModBlck, eModBlck` e capacità
+  intere pulite ≥ 1 (MCFSimplex è sensibile a capacità a molte cifre). Cross-check
+  contro `:MILPSolver` a ogni round, inclusa la **propagazione dell'infeasibility**
+  quando la chiusura di un arco rende l'MCF inammissibile.
+
+Entrambi girano in `regression` (statico + round `-M`) e in CMake/ctest
+(`FWS_test`, `FWS_mcf_test`); la matrice di validazione (varianti × `eModReset`/
+`eModFine` × `DQuad`/`Quad`, e cost/cap/fix × seed × istanze) è quella riportata
+nel README del tester.
+
 ### Note di implementazione / limiti v1 (compute)
 
-Il loop vanilla è implementato in `compute()` (compila pulito; non ancora
-testato a runtime, manca il tester). Scelte/limiti v1:
+Il loop vanilla e le varianti active-set sono implementati in `compute()` e
+testati a runtime (vedi "Tester implementati"). Scelte/limiti v1:
 
 - **Inizializzazione**: un primo LMO al punto corrente (variabili a 0 di
   default) dà il vertice iniziale `x0 = v0` (sempre ammissibile).
 - **`f_value = F(x)`** calcolato come `f_father(x) + (mx_sum − ⟨g,x⟩)` (vale per
   tutti i modi; in `LMOLinear` si riduce a `f_father(x)`). `f_bound = F(x) ∓ gap`.
-- **Modification**: v1 assume problema statico → `inhibit_Modification(true)` in
-  `set_Block` (scarta le Modification, comprese quelle auto-indotte dallo
-  scatter, che comunque raggiungono i solver dei figli). Trattamento reale: §8.
+- **Modification**: gestione lazy completa con warm-start — vedi §8.
+  L'`inhibit_Modification(true)` non è più globale in `set_Block` ma riusato come
+  `play_dumb` solo attorno ad algoritmo e restore.
 - **`LMOLinear` richiede figli `LinearFunction`** (niente parte quadratica da
   tenere nell'oracolo): se un figlio è DQuad/Quad in `LMOLinear`, `compute()`
   tira eccezione (usare `LMOQuad`/`LMOFull`). `LMOQuad`/`LMOFull` lasciano la

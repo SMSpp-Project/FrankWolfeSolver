@@ -662,40 +662,49 @@ void FrankWolfeSolver::run_LMOs( bool changedvars )
  if( ( f_max_thread <= 1 ) || ( f_nsb <= 1 ) ) {
   for( auto & d : v_sb )
    run_one( d );
-  return;
+  }
+ else {
+  // parallel path: each LMO runs on its own (distinct) sub-Block, with the
+  // FrankWolfeSolver identity lent to its :Solver (so lock( f_id ) on the
+  // already-f_id-owned sub-Block never contends); load-balanced via an atomic
+  // counter, the main thread participating. No shared mutable state: each LMO
+  // writes only into its own sub-Block and its own SubBlockData slot.
+
+  std::atomic< Index > next( 0 );
+  auto chunk = [ & ]() {
+   for( ; ; ) {
+    Index i = next.fetch_add( 1 );
+    if( i >= f_nsb )
+     break;
+    run_one( v_sb[ i ] );
+    }
+   };
+
+  int nthreads = std::min< int >( f_max_thread , int( f_nsb ) );
+  std::vector< std::thread > pool;
+  pool.reserve( nthreads - 1 );
+  for( int t = 1 ; t < nthreads ; ++t )
+   pool.emplace_back( chunk );
+  chunk();                                // the main thread participates
+  for( auto & th : pool )
+   th.join();
+
+  // re-throw (in the main thread) the first exception, if any
+  for( auto & d : v_sb )
+   if( d.excp ) {
+    auto e = d.excp;
+    d.excp = nullptr;
+    std::rethrow_exception( e );
+    }
   }
 
- // parallel path: each LMO runs on its own (distinct) sub-Block, with the
- // FrankWolfeSolver identity lent to its :Solver (so lock( f_id ) on the
- // already-f_id-owned sub-Block never contends); load-balanced via an atomic
- // counter, the main thread participating. No shared mutable state: each LMO
- // writes only into its own sub-Block and its own SubBlockData slot.
-
- std::atomic< Index > next( 0 );
- auto chunk = [ & ]() {
-  for( ; ; ) {
-   Index i = next.fetch_add( 1 );
-   if( i >= f_nsb )
-    break;
-   run_one( v_sb[ i ] );
-   }
-  };
-
- int nthreads = std::min< int >( f_max_thread , int( f_nsb ) );
- std::vector< std::thread > pool;
- pool.reserve( nthreads - 1 );
- for( int t = 1 ; t < nthreads ; ++t )
-  pool.emplace_back( chunk );
- chunk();                                // the main thread participates
- for( auto & th : pool )
-  th.join();
-
- // re-throw (in the main thread) the first exception, if any
- for( auto & d : v_sb )
-  if( d.excp ) {
-   auto e = d.excp;
-   d.excp = nullptr;
-   std::rethrow_exception( e );
+ // a sub-Block whose (relaxed) feasible region is empty makes the product
+ // region -- hence the father -- infeasible
+ f_lmo_infeas = false;
+ for( const auto & d : v_sb )
+  if( d.status == kInfeasible ) {
+   f_lmo_infeas = true;
+   break;
    }
  }
 
@@ -759,10 +768,71 @@ char FrankWolfeSolver::guts_of_process_modifications( const Modification * mod )
   return( 8 );    // may tighten the feasible region: re-check
   }
 
- // any other Modification (constraints, variable bounds, ...) may change the
- // feasible region: the active-set atoms may have become infeasible. Return the
- // "feasibility" bit (8): with a warm-started active set they are re-checked
- // (eModFine) or dropped (eModReset)
+ // From here on, Modification that may change the *feasible region*: an
+ // active-set atom may have become infeasible. We mirror the "relax test" of
+ // LagBFunction, returning the feasibility bit (8) only when the change can
+ // tighten the region, and 0 when it surely cannot (the atoms stay feasible).
+
+ // VariableMod: a ColVariable changed status (fixed/unfixed, integrality, sign,
+ // unitary). The atoms stay feasible iff every attribute was either unchanged
+ // or *relaxed* (a restriction removed); a newly added restriction (e.g. the
+ // variable was *fixed*, or made integer/positive/negative/unitary) may exclude
+ // them. The per-attribute test "( curr == old ) || ( !curr && old )" is true
+ // exactly when that attribute was not newly added.
+ if( const auto tmod = dynamic_cast< const VariableMod * >( mod ) ) {
+  const auto xj = dynamic_cast< const ColVariable * >( tmod->variable() );
+  if( ! xj )
+   return( 8 );  // unknown Variable type: worst case
+  const auto os = tmod->old_state();
+  auto relaxed = []( bool curr , bool old ) { return( ( curr == old ) ||
+                                                      ( ! curr && old ) ); };
+  if( relaxed( xj->is_fixed()    , xj->is_fixed( os )    ) &&
+      relaxed( xj->is_integer()  , xj->is_integer( os )  ) &&
+      relaxed( xj->is_positive() , xj->is_positive( os ) ) &&
+      relaxed( xj->is_negative() , xj->is_negative( os ) ) &&
+      relaxed( xj->is_unitary()  , xj->is_unitary( os )  ) )
+   return( 0 );   // only relaxations / no change: atoms stay feasible
+
+  // a restriction was added (e.g. a variable was *fixed*, or made integer /
+  // positive). Block::is_feasible() checks the constraints and the variable
+  // sign/integrality, but NOT the fixing (which is a Variable *status*, not a
+  // constraint): an atom violating a new fixing would not be caught. We
+  // therefore conservatively re-analyze and drop the active set (4) rather than
+  // route it through the feasibility check (8).
+  return( 4 );
+  }
+
+ // RowConstraintMod: a constraint's LHS/RHS changed. The feasible region may
+ // shrink; the direction (an increase of RHS, or decrease of LHS, only relaxes)
+ // cannot be detected without the previous value (same limitation as
+ // LagBFunction), so we conservatively re-check.
+ if( const auto tmod = dynamic_cast< const RowConstraintMod * >( mod ) ) {
+  if( ( tmod->type() == RowConstraintMod::eChgLHS ) ||
+      ( tmod->type() == RowConstraintMod::eChgRHS ) ||
+      ( tmod->type() == RowConstraintMod::eChgBTS ) )
+   return( 8 );
+  }
+
+ // ConstraintMod: a Constraint was relaxed or enforced. Enforcing shrinks the
+ // feasible region (check); relaxing enlarges it (nothing to do).
+ if( const auto tmod = dynamic_cast< const ConstraintMod * >( mod ) )
+  return( tmod->type() == ConstraintMod::eEnforceConst ? 8 : 0 );
+
+ // BlockModAD: a dynamic Variable/Constraint was added/deleted. By the SMS++
+ // semantics (un-generated dynamic Variable are "there at their default", so
+ // generating one cannot make a feasible Solution infeasible; a fortiori
+ // deleting a dynamic Constraint cannot either), only *deleting a Variable* or
+ // *adding a Constraint* can shrink the feasible region.
+ if( const auto tmod = dynamic_cast< const BlockModAD * >( mod ) )
+  return( ( tmod->is_variable() && ( ! tmod->is_added() ) ) ||
+          ( ( ! tmod->is_variable() ) && tmod->is_added() ) ? 8 : 0 );
+
+ // any other Block change may arbitrarily violate feasibility -> re-check
+ if( dynamic_cast< const BlockMod * >( mod ) )
+  return( 8 );
+
+ // unrecognized Modification: take the safe route and re-check (more
+ // conservative than LagBFunction, which ignores it)
  return( 8 );
  }
 
@@ -1069,6 +1139,7 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   evaluate_gradient();
   scatter();
   run_LMOs( true );
+  if( f_lmo_infeas ) { f_has_sol = false; return( kInfeasible ); }
   OFValue mv_init = 0;
   for( auto & d : v_sb )
    mv_init += d.value;
@@ -1094,6 +1165,7 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   capture_father_values( f_xval );
 
   run_LMOs( true );
+  if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
   OFValue mv_sum = 0;
   for( auto & d : v_sb )
    mv_sum += d.value;                            // sum_j M_j(v_j)
@@ -1194,6 +1266,7 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   evaluate_gradient();
   scatter();
   run_LMOs( true );
+  if( f_lmo_infeas ) { f_has_sol = false; return( kInfeasible ); }
   OFValue mv_init = 0;
   for( auto & d : v_sb )
    mv_init += d.value;
@@ -1250,6 +1323,7 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
 
   // FW vertex: the LMO of grad F
   run_LMOs( true );
+  if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
   OFValue mv_sum = 0;
   for( auto & d : v_sb )
    mv_sum += d.value;                            // <grad F, v>

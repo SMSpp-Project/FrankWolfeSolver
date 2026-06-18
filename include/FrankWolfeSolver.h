@@ -620,6 +620,8 @@ class FrankWolfeSolver : public CDASolver
  OFValue f_bound = 0;          ///< F(x) - gap, best bound found
  bool f_has_sol = false;       ///< whether a (primal) solution is available
  bool f_modified = false;      ///< whether the sub-Block objectives were modified
+ bool f_lmo_infeas = false;    ///< whether the last run_LMOs found an infeasible
+                               ///< sub-Block (=> the father is infeasible)
 
 /*--------------------------------------------------------------------------*/
 /*--------------------- PRIVATE PART OF THE CLASS --------------------------*/
