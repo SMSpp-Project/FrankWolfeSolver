@@ -86,6 +86,9 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_max_time    = get_dflt_dbl_par( dblMaxTime );
  f_rel_acc     = get_dflt_dbl_par( dblRelAcc );
  f_abs_acc     = get_dflt_dbl_par( dblAbsAcc );
+ f_log_verb    = get_dflt_int_par( intLogVerb );
+ f_everyk      = get_dflt_int_par( intEverykIt );
+ f_every_t     = get_dflt_dbl_par( dblEveryTTm );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -465,6 +468,8 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
   case( intHandleMod ):  f_handle_mod = value;  return;
   case( intMaxThread ):         f_max_thread = value;  return;
   case( intMaxIter ):           f_max_iter = value;    return;
+  case( intLogVerb ):           f_log_verb = value;    return;
+  case( intEverykIt ):          f_everyk = value;      return;
   default:                      CDASolver::set_par( par , value );
   }
  }
@@ -477,6 +482,7 @@ void FrankWolfeSolver::set_par( idx_type par , double value )
   case( dblMaxTime ): f_max_time = value; return;
   case( dblRelAcc ):  f_rel_acc = value;  return;
   case( dblAbsAcc ):  f_abs_acc = value;  return;
+  case( dblEveryTTm ): f_every_t = value; return;
   default:            CDASolver::set_par( par , value );
   }
  }
@@ -511,6 +517,8 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intHandleMod ):  return( f_handle_mod );
   case( intMaxThread ):         return( f_max_thread );
   case( intMaxIter ):           return( f_max_iter );
+  case( intLogVerb ):           return( f_log_verb );
+  case( intEverykIt ):          return( f_everyk );
   default:                      return( CDASolver::get_int_par( par ) );
   }
  }
@@ -523,6 +531,7 @@ double FrankWolfeSolver::get_dbl_par( idx_type par ) const
   case( dblMaxTime ): return( f_max_time );
   case( dblRelAcc ):  return( f_rel_acc );
   case( dblAbsAcc ):  return( f_abs_acc );
+  case( dblEveryTTm ): return( f_every_t );
   default:            return( CDASolver::get_dbl_par( par ) );
   }
  }
@@ -981,11 +990,18 @@ int FrankWolfeSolver::compute( bool changedvars )
  if( ! f_Block )
   throw( std::logic_error( "FrankWolfeSolver::compute: no Block registered" ) );
 
+ // lock the Solver against concurrent compute() from other threads: every
+ // Solver has an internal recursive mutex (see Solver::lock()). It is released
+ // before every return below (and in the catch).
+ lock();
+
  // lock the father Block (LagrangianDualSolver pattern) - - - - - - - - - - -
 
  bool owned = f_Block->is_owned_by( f_id );
- if( ( ! owned ) && ( ! f_Block->lock( f_id ) ) )
+ if( ( ! owned ) && ( ! f_Block->lock( f_id ) ) ) {
+  unlock();
   return( kBlockLocked );
+  }
 
  // process any Modification arrived from the sub-Block since the last
  // compute() (lazily), possibly rebuilding the cached structure, *before*
@@ -1020,6 +1036,7 @@ int FrankWolfeSolver::compute( bool changedvars )
   inhibit_Modification( false );
   if( ! owned )
    f_Block->unlock( f_id );
+  unlock();
   throw;
   }
 
@@ -1033,7 +1050,34 @@ int FrankWolfeSolver::compute( bool changedvars )
  if( ! owned )
   f_Block->unlock( f_id );
 
+ // final-summary log (intLogVerb >= 1): one line per compute() call with the
+ // iteration count, the final value and gap, the status, and (for the
+ // active-set variants) the size of the active set
+ if( f_log && ( f_log_verb >= 1 ) ) {
+  *f_log << "FrankWolfeSolver: " << f_niter << " iters, value " << f_value
+         << ", gap " << f_last_gap << ", status " << status;
+  if( f_algorithm != AlgVanilla )
+   *f_log << ", |A| " << f_aset.size();
+  *f_log << std::endl;
+  }
+
+ unlock();
  return( status );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+int FrankWolfeSolver::run_event( int type )
+{
+ // invoke the registered handlers of this event type in order, stopping at the
+ // first that does not return eContinue (BundleSolver pattern); that response
+ // (eForceContinue / eStopOK / eStopError) drives the caller's reaction
+ for( auto & ev : v_events[ type ] ) {
+  int res = ev();
+  if( res != eContinue )
+   return( res );
+  }
+ return( eContinue );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -1151,10 +1195,24 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   }
 
  int status = kStopIter;
+ double lastETT = 0;            // last time the eEveryTTime events were fired
 
  for( int t = 0 ; ; ++t ) {
   if( t >= f_max_iter )         { status = kStopIter; break; }
   if( elapsed() >= f_max_time ) { status = kStopTime; break; }
+
+  // periodic events (eEverykIteration / eEveryTTime); a handler may stop us
+  if( f_everyk && ! ( t % f_everyk ) ) {
+   int ev = run_event( eEverykIteration );
+   if( ev == eStopOK )    { status = kOK;    break; }
+   if( ev == eStopError ) { status = kError; break; }
+   }
+  if( f_every_t && ( elapsed() >= lastETT + f_every_t ) ) {
+   lastETT = elapsed();
+   int ev = run_event( eEveryTTime );
+   if( ev == eStopOK )    { status = kOK;    break; }
+   if( ev == eStopError ) { status = kError; break; }
+   }
 
   f_x->write( f_Block );
   evaluate_gradient();
@@ -1183,12 +1241,21 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   f_value = father_val + ( cost_x - gx );
   OFValue gap = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
   f_bound = f_max ? ( f_value + gap ) : ( f_value - gap );
+  f_niter = t; f_last_gap = gap;             // for the final-summary log
+
+  if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
+   *f_log << "  FW it " << t << ": value " << f_value << ", gap " << gap
+          << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
   if( ( gap <= rel_thr ) ||
       ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ) {
-   status = kOK;
-   break;
+   // eBeforeTermination: a handler may veto the optimality stop (eForceContinue)
+   int ev = run_event( eBeforeTermination );
+   if( ev != eForceContinue ) {
+    status = ( ev == eStopError ) ? kError : kOK;
+    break;
+    }
    }
 
   OFValue gamma;
@@ -1286,10 +1353,24 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
  std::vector< FunctionValue > a_val;   // away-atom father values
 
  int status = kStopIter;
+ double lastETT = 0;            // last time the eEveryTTime events were fired
 
  for( int t = 0 ; ; ++t ) {
   if( t >= f_max_iter )         { status = kStopIter; break; }
   if( elapsed() >= f_max_time ) { status = kStopTime; break; }
+
+  // periodic events (eEverykIteration / eEveryTTime); a handler may stop us
+  if( f_everyk && ! ( t % f_everyk ) ) {
+   int ev = run_event( eEverykIteration );
+   if( ev == eStopOK )    { status = kOK;    break; }
+   if( ev == eStopError ) { status = kError; break; }
+   }
+  if( f_every_t && ( elapsed() >= lastETT + f_every_t ) ) {
+   lastETT = elapsed();
+   int ev = run_event( eEveryTTime );
+   if( ev == eStopOK )    { status = kOK;    break; }
+   if( ev == eStopError ) { status = kError; break; }
+   }
 
   // gradient and linearization at x
   f_x->write( f_Block );
@@ -1299,15 +1380,23 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   OFValue mx_sum = eval_modified_objective();    // <grad F, x>
   capture_father_values( f_xval );
 
-  // away vertex: the active-set atom a maximizing (minimizing, if eMax)
-  // <grad F, a> — the "worst" atom we want to move weight away from. With
-  // linear sub-Block objectives <grad F, a_i> = <grad f_father(x), a_i> + c_i
-  // is a cheap cached dot product; otherwise the atom is written and evaluated.
+  // away vertex: the active-set atom a maximizing (minimizing, if eMax) the
+  // (modified) objective <grad F, a> — the "worst" atom we want to move weight
+  // away from. La_i = sum_j M_j(a_i) = <grad f_father(x), a_i> + c_i, where
+  // c_i = f_ci is the x-INDEPENDENT part sum_j[ alpha <c_j,a_ij> + beta q_j(a_ij) ]
+  // (the quadratic part included): so the cheap cached dot product is exact, not
+  // just for linear children, but also (i) for any *vertex* atom (where c_i is
+  // the cost at the vertex) and (ii) in eObjCvxComb (P2) mode, where the value
+  // model is itself cbar = sum_i lambda_i c_i, so the convex-combination cost of
+  // an *aggregate* atom is exactly its f_ci. Only the eObjAtX (P1) mode with
+  // quadratic children and aggregate atoms needs the atom written and re-evaluated
+  // at its (fractional) point; everything else uses the O(G) cached form.
+  const bool cached_argmax = all_lin || cvx;
   Index a_idx = 0;
   OFValue La_a = f_max ? Inf< OFValue >() : - Inf< OFValue >();
   for( Index i = 0 ; i < f_aset.size() ; ++i ) {
    OFValue La;
-   if( all_lin )
+   if( cached_argmax )
     La = grad_dot( f_aset[ i ].f_val ) + f_aset[ i ].f_ci;
    else {
     f_aset[ i ].f_sol->write( f_Block );
@@ -1344,12 +1433,21 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   OFValue fw_gap   = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
   OFValue away_gap = f_max ? ( cost_x - La_a )   : ( La_a - cost_x );
   f_bound = f_max ? ( f_value + fw_gap ) : ( f_value - fw_gap );
+  f_niter = t; f_last_gap = fw_gap;          // for the final-summary log
+
+  if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
+   *f_log << "  FW it " << t << ": value " << f_value << ", gap " << fw_gap
+          << ", |A| " << f_aset.size() << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
   if( ( fw_gap <= rel_thr ) ||
       ( std::isfinite( f_abs_acc ) && ( fw_gap <= f_abs_acc ) ) ) {
-   status = kOK;
-   break;
+   // eBeforeTermination: a handler may veto the optimality stop (eForceContinue)
+   int ev = run_event( eBeforeTermination );
+   if( ev != eForceContinue ) {
+    status = ( ev == eStopError ) ? kError : kOK;
+    break;
+    }
    }
 
   // choose the step type and its data - - - - - - - - - - - - - - - - - - - -
