@@ -6,10 +6,11 @@ the FrankWolfe.jl algorithms as *verbatim* as possible, adapted to the
 structures of SMS++ (Block tree, `C05Function`, `Solver`, `Solution`,
 `Modification`).
 
-Text in English, technical identifiers in English, as per the conventions of the
-primer (`SMS++-CONTEXT.md`, §13).
+Text in English, technical identifiers in English, as per the SMS++ project
+conventions.
 
-Status: **design approved on the main points; v1 = vanilla Frank-Wolfe.**
+Status: **implemented: vanilla, away-step and blended-pairwise Frank-Wolfe**
+(see the per-section notes below for the state of each part).
 
 ---
 
@@ -642,7 +643,7 @@ Factory: `SMSpp_insert_in_factory_h` (header), `SMSpp_insert_in_factory_cpp_0(
 FrankWolfeSolver )` (cpp). Makefile macro prefix: `FWSlv` (in the style of
 `StcBlk`, `SDDPBk`, `MILP`).
 
-### Parameters (8-point system, §7 of the primer)
+### Parameters (8-point system)
 
 The names do not have the `FWSlv` infix: being in the ComputeConfig of a
 `FrankWolfeSolver` it is obvious they are its own (unlike LDS, where the names

@@ -1381,7 +1381,7 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   capture_father_values( f_xval );
 
   // away vertex: the active-set atom a maximizing (minimizing, if eMax) the
-  // (modified) objective <grad F, a> — the "worst" atom we want to move weight
+  // (modified) objective <grad F, a>, the "worst" atom we want to move weight
   // away from. La_i = sum_j M_j(a_i) = <grad f_father(x), a_i> + c_i, where
   // c_i = f_ci is the x-INDEPENDENT part sum_j[ alpha <c_j,a_ij> + beta q_j(a_ij) ]
   // (the quadratic part included): so the cheap cached dot product is exact, not
