@@ -47,9 +47,17 @@ jobs:
         run: cmake --build smspp-project/build --target install -- -j$(nproc)
 
       - name: Test
-        # run only this module's tests: each test is labelled in tests/ with its
-        # owning module (the label matches the repo name), so selecting by label
-        # needs no hard-coded paths and keeps this workflow identical everywhere
+        # Mirror the GitLab CI, single-sourced: if this module's .gitlab-ci.yml
+        # runs a labelled ctest (ctest ... -L ...), run exactly that set here,
+        # selecting by the repo-name label (each test is tagged in tests/ with
+        # its owning module). Otherwise the module has no integration tests, so
+        # this is a build-only (compile-check) CI. This workflow is identical in
+        # every repo and never needs per-module changes: the recipe lives in
+        # .gitlab-ci.yml.
         run: |
-          ctest --test-dir smspp-project/build -L "${GITHUB_REPOSITORY##*/}" \
-                -V -C Release --no-tests=error
+          if grep -qE 'ctest .* -L ' .gitlab-ci.yml; then
+            ctest --test-dir smspp-project/build -L "${GITHUB_REPOSITORY##*/}" \
+                  -V -C Release --no-tests=error
+          else
+            echo "no labelled tests for ${GITHUB_REPOSITORY##*/}; build-only CI"
+          fi
