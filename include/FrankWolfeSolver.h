@@ -324,12 +324,23 @@ class FrankWolfeSolver : public CDASolver
  *  @{ */
 
  /// constructor: initialises the parameters to their default values
- FrankWolfeSolver( void ) : CDASolver() { set_default_parameters(); }
+ FrankWolfeSolver( void ) : CDASolver()
+ {
+  v_events.resize( max_event_number() );  // the three standard event slots
+  set_default_parameters();
+  }
 
 /*--------------------------------------------------------------------------*/
 
  /// destructor: detaches from the Block and releases all resources
  ~FrankWolfeSolver() override { set_Block( nullptr ); }
+
+/*--------------------------------------------------------------------------*/
+
+ /// FrankWolfeSolver supports the three standard ThinComputeInterface events
+ /** eBeforeTermination (vetoable optimality stop), eEverykIteration (every
+  * intEverykIt iterations) and eEveryTTime (every dblEveryTTm seconds). */
+ EventID max_event_number( void ) const override { return( 3 ); }
 
 /** @} ---------------------------------------------------------------------*/
 /*-------------------------- OTHER INITIALIZATIONS -------------------------*/
@@ -546,6 +557,13 @@ class FrankWolfeSolver : public CDASolver
  /// Away-step / Blended-Pairwise loop (with active set)
  int compute_active_set( bool changedvars );
 
+ /// run all handlers of the given event type and return the decisive action
+ /** Invokes, in order, all the registered handlers of event type @p type
+  * (an index into v_events) until one returns something other than
+  * eContinue; returns that response (eForceContinue / eStopOK / eStopError),
+  * or eContinue if there are no handlers or they all return eContinue. */
+ int run_event( int type );
+
  /// sum over the sub-Block of their (modified) objective at the current point
  OFValue eval_modified_objective( void );
 
@@ -585,6 +603,13 @@ class FrankWolfeSolver : public CDASolver
  double f_max_time;    ///< dblMaxTime
  double f_rel_acc;     ///< dblRelAcc
  double f_abs_acc;     ///< dblAbsAcc
+ int f_log_verb;       ///< intLogVerb (verbosity of the log)
+ int f_everyk;         ///< intEverykIt (period of the eEverykIteration events)
+ double f_every_t;     ///< dblEveryTTm (period of the eEveryTTime events)
+
+ // statistics of the last compute(), for the final-summary log (intLogVerb 1)
+ Index f_niter = 0;        ///< iterations performed by the last compute()
+ OFValue f_last_gap = 0;   ///< final Frank-Wolfe gap of the last compute()
 
  // problem structure - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
