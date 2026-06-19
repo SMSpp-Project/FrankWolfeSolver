@@ -47,4 +47,9 @@ jobs:
         run: cmake --build smspp-project/build --target install -- -j$(nproc)
 
       - name: Test
-        run: ctest --test-dir smspp-project/build -V -C Release --no-tests=error
+        # run only this module's tests: each test is labelled in tests/ with its
+        # owning module (the label matches the repo name), so selecting by label
+        # needs no hard-coded paths and keeps this workflow identical everywhere
+        run: |
+          ctest --test-dir smspp-project/build -L "${GITHUB_REPOSITORY##*/}" \
+                -V -C Release --no-tests=error
