@@ -747,7 +747,7 @@ along the "independence from the Block type" axis:
 
 - **`test-mcf.cpp` (MCF-specific)** — exercises the changes of the **feasible
   region**, which intrinsically require knowing the type: it builds `-k` `MCFBlock`
-  under a `DQuad` father, and in random rounds (style of `tests/MCF_MILP`) it
+  under a `DQuad` father, and in random rounds (style of `tests/MCFBlock`) it
   changes **costs** (`chg_costs` → objective change), **capacities** (`chg_ucaps` →
   region change) or **fixes/unfixes** an arc (closure/reopening = `VariableMod`
   that restricts/relaxes), always with `eModBlck, eModBlck` and clean integer
