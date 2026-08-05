@@ -466,11 +466,11 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
   case( intMaxAtoms ):   f_max_atoms = value;   return;
   case( intCvxComb ):    f_cvx_comb = value;    return;
   case( intHandleMod ):  f_handle_mod = value;  return;
-  case( intMaxThread ):         f_max_thread = value;  return;
-  case( intMaxIter ):           f_max_iter = value;    return;
-  case( intLogVerb ):           f_log_verb = value;    return;
-  case( intEverykIt ):          f_everyk = value;      return;
-  default:                      CDASolver::set_par( par , value );
+  case( intMaxThread ):  f_max_thread = value;  return;
+  case( intMaxIter ):    f_max_iter = value;    return;
+  case( intLogVerb ):    f_log_verb = value;    return;
+  case( intEverykIt ):   f_everyk = value;      return;
+  default:               CDASolver::set_par( par , value );
   }
  }
 
@@ -479,11 +479,11 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
 void FrankWolfeSolver::set_par( idx_type par , double value )
 {
  switch( par ) {
-  case( dblMaxTime ): f_max_time = value; return;
-  case( dblRelAcc ):  f_rel_acc = value;  return;
-  case( dblAbsAcc ):  f_abs_acc = value;  return;
+  case( dblMaxTime ):  f_max_time = value; return;
+  case( dblRelAcc ):   f_rel_acc = value;  return;
+  case( dblAbsAcc ):   f_abs_acc = value;  return;
   case( dblEveryTTm ): f_every_t = value; return;
-  default:            CDASolver::set_par( par , value );
+  default:             CDASolver::set_par( par , value );
   }
  }
 
@@ -499,7 +499,7 @@ int FrankWolfeSolver::get_dflt_int_par( idx_type par ) const
   case( intMaxAtoms ):   return( 0 );
   case( intCvxComb ):    return( eObjCvxComb );
   case( intHandleMod ):  return( eModReset );
-  default:                      return( CDASolver::get_dflt_int_par( par ) );
+  default:               return( CDASolver::get_dflt_int_par( par ) );
   }
  }
 
@@ -515,11 +515,11 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intMaxAtoms ):   return( f_max_atoms );
   case( intCvxComb ):    return( f_cvx_comb );
   case( intHandleMod ):  return( f_handle_mod );
-  case( intMaxThread ):         return( f_max_thread );
-  case( intMaxIter ):           return( f_max_iter );
-  case( intLogVerb ):           return( f_log_verb );
-  case( intEverykIt ):          return( f_everyk );
-  default:                      return( CDASolver::get_int_par( par ) );
+  case( intMaxThread ):  return( f_max_thread );
+  case( intMaxIter ):    return( f_max_iter );
+  case( intLogVerb ):    return( f_log_verb );
+  case( intEverykIt ):   return( f_everyk );
+  default:               return( CDASolver::get_int_par( par ) );
   }
  }
 
@@ -528,11 +528,11 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
 double FrankWolfeSolver::get_dbl_par( idx_type par ) const
 {
  switch( par ) {
-  case( dblMaxTime ): return( f_max_time );
-  case( dblRelAcc ):  return( f_rel_acc );
-  case( dblAbsAcc ):  return( f_abs_acc );
+  case( dblMaxTime ):  return( f_max_time );
+  case( dblRelAcc ):   return( f_rel_acc );
+  case( dblAbsAcc ):   return( f_abs_acc );
   case( dblEveryTTm ): return( f_every_t );
-  default:            return( CDASolver::get_dbl_par( par ) );
+  default:             return( CDASolver::get_dbl_par( par ) );
   }
  }
 
