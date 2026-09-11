@@ -17,14 +17,20 @@
 # --------------------------------------------------------------------------- #
 cmake_minimum_required(VERSION 3.21)
 cmake_policy(VERSION 3.15)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/DeriveVersion.cmake)
+smspp_derive_version(SMSPP_MODULE_VERSION)
+
 project(FrankWolfeSolver
-        VERSION 0.1.0
+        VERSION ${SMSPP_MODULE_VERSION}
         DESCRIPTION "SMS++ FrankWolfeSolver module"
         HOMEPAGE_URL https://gitlab.com/smspp/frankwolfesolver
         LANGUAGES C CXX)
 
 # These variables make the code harder to read but easier to change.
 set(modName ${PROJECT_NAME})
+
+# C-safe form of modName for the preprocessor macros in <modName>Config.h
+string(MAKE_C_IDENTIFIER "${modName}" modMacro)
 set(modNamespace "SMS++")
 
 # Find out if it's being called by the umbrella.
@@ -55,11 +61,40 @@ endif ()
 # This will generate a *Config.h header in the build directory.
 configure_file(cmake/${modName}Config.h.in ${modName}Config.h)
 
+# ----- RPATH --------------------------------------------------------------- #
+# The installed libraries and executables look for the libraries of the same
+# installation relative to their own location, so that the installed tree can
+# be moved as a whole; the directories of the external libraries are kept.
+include(GNUInstallDirs)
+if (NOT CMAKE_INSTALL_RPATH)
+    if (APPLE)
+        set(rpathOrigin "@loader_path")
+    else ()
+        set(rpathOrigin "$ORIGIN")
+    endif ()
+    file(RELATIVE_PATH binToLib ${CMAKE_INSTALL_FULL_BINDIR}
+            ${CMAKE_INSTALL_FULL_LIBDIR})
+    set(CMAKE_INSTALL_RPATH "${rpathOrigin}" "${rpathOrigin}/${binToLib}")
+endif ()
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+
 # ----- Library ------------------------------------------------------------- #
 # With the BUILD_SHARED_LIBS variable we can specify if the library will
 # be STATIC or SHARED, so no reason to do it now.
 add_library(${modName})
 target_compile_features(${modName} PUBLIC cxx_std_20)
+
+# The name of the shared library carries the version of its binary interface,
+# which any minor release may change while the major version is 0, and then
+# any major release.
+if (PROJECT_VERSION_MAJOR EQUAL 0)
+    set(soVersion ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR})
+else ()
+    set(soVersion ${PROJECT_VERSION_MAJOR})
+endif ()
+set_target_properties(${modName} PROPERTIES
+        VERSION ${PROJECT_VERSION}
+        SOVERSION ${soVersion})
 
 if (MSVC AND BUILD_SHARED_LIBS)
     target_link_options(${modName} INTERFACE "/INCLUDE:SMSpp_force_load_${modName}")
@@ -87,6 +122,7 @@ target_sources(${modName} PRIVATE
 target_include_directories(
         ${modName} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
         $<INSTALL_INTERFACE:include/${modNamespace}>)
 
 # When linking other targets to the library with target_link_libraries(),

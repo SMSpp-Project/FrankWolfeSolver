@@ -6,10 +6,11 @@ the FrankWolfe.jl algorithms as *verbatim* as possible, adapted to the
 structures of SMS++ (Block tree, `C05Function`, `Solver`, `Solution`,
 `Modification`).
 
-Text in English, technical identifiers in English, as per the conventions of the
-primer (`SMS++-CONTEXT.md`, §13).
+Text in English, technical identifiers in English, as per the SMS++ project
+conventions.
 
-Status: **design approved on the main points; v1 = vanilla Frank-Wolfe.**
+Status: **implemented: vanilla, away-step and blended-pairwise Frank-Wolfe**
+(see the per-section notes below for the state of each part).
 
 ---
 
@@ -153,10 +154,9 @@ It is a **qualifying feature** of the solver, controlled by `intCvxComb`:
   `h_j` is the **convex combination of the costs at the vertices** `v_{jk}` of the
   active set (the `λ_{jk}` are the FW weights), i.e. the **convex hull** of `h_j`
   restricted to the generated vertices. It is exactly the **Dantzig-Wolfe
-  decomposition / simplicial decomposition** bound, and — when `conv(C_j)` is the
-  integer convex hull of the child — it coincides with the **perspective/Perspective-
-  Cut** (P/C) bound that the cut-separated continuous-relaxed DP formulation
-  computes.
+  decomposition / simplicial decomposition** bound over `conv(C_j)`: when the
+  oracle returns vertices of the integer convex hull of the child, (P2) is the
+  strongest decomposition bound obtainable from those columns.
 
 **Relation.** By Jensen's inequality (`h_j` convex, `x_j = Σ_k λ_{jk} v_{jk}`):
 `F_P2(x) ≥ F_P1(x)`, with **equality for linear children** (`q_j=0`): in that case
@@ -179,10 +179,11 @@ same vertices, same direction):
   the gate of the exact line search is relaxed (the model is linear-in-the-weights).
 
 In summary: **same oracle, same scheme, two different value-functions** → P2 ≥
-P1, and P2 is the formal bridge between Frank-Wolfe and Dantzig-Wolfe /
-Perspective-Cut. This is what allowed validating `FrankWolfeSolver` (P2/`LMOFull`
-mode) against `MILPSolver`+DPForm+P/C on `ThermalUnitBlock`: same bound up to
-tolerance, even in the case of fractional commitment in which `P1 ≠ P2`.
+P1, and P2 is the formal bridge between Frank-Wolfe and Dantzig-Wolfe
+decomposition. P2/`LMOFull` mode has been validated against a monolithic
+`MILPSolver` on the relaxation over the same convex hull, including cases of a
+fractional optimum in which `P1 ≠ P2` (see the tester for the Block-specific
+cross-checks).
 
 ---
 
@@ -285,19 +286,82 @@ ones), and it counts in the budget. **Trade-off**: aggregates are not vertices �
 the linear convergence of the away-step is weakened (the "aggregated bundle"
 regime), in exchange for limited memory/cost-per-iteration.
 
-**Cached argmax (linear children)**: `⟨∇F(x), a_i⟩ = ⟨g(x), a_i⟩ + c_i`, with
-`c_i = ⟨c, a_i⟩` **independent of x** (stored per atom, `Atom::f_ci`, computed at
-insertion as `M_j(v)−⟨g,v⟩`, aggregated linearly). Thus the argmax is a **scalar
-product** `⟨f_grad, a_i.f_val⟩ + c_i` — no write into the Block nor
-`Function::compute` per atom. With quadratic children (`!all_lin`) one goes back to
-writing+evaluating. `a_val` (the values of the away atom) is read from
+**Cached argmax (`all_lin || cvx`)**: `sum_j M_j(a_i) = ⟨g(x), a_i⟩ + c_i`, with
+`c_i = Atom::f_ci` the **x-independent** part `sum_j[ α⟨c_j,a_ij⟩ + β q_j(a_ij) ]`
+(the quadratic `q` included), stored per atom (computed at insertion as
+`M_j(v)−⟨g,v⟩`, aggregated linearly). Thus the argmax is a **scalar product**
+`⟨f_grad, a_i.f_val⟩ + c_i` — no write into the Block nor `Function::compute` per
+atom. This is exact not only for linear children but for any **vertex** atom (where
+`c_i` is the cost at the vertex), and in **`eObjCvxComb` (P2)** mode for
+**aggregates** too — there the value model is itself `cbar = sum_i λ_i c_i`, so the
+convex-combination cost of an aggregate *is* its `f_ci` (and using it makes the
+away selection consistent with the value/gap). Only `eObjAtX` (P1) with quadratic
+children **and** aggregate atoms falls back to writing+evaluating each atom at its
+(fractional) point. `a_val` (the away atom's values) is read from
 `f_aset[a_idx].f_val` (already stored), no capture.
+
+*Why this matters (measured).* With the old `all_lin`-only gate, quadratic children
+(a convex-quadratic child cost solved by an exact oracle) forced the away-step/BPCG
+argmax onto the write+evaluate path: a `Solution::write` (into the Block) plus a
+`Function::compute` **per atom, per iteration**, i.e. `O(|aset|·child-eval)`. A
+profile of a single quadratic-child instance showed essentially *all* the FW-loop
+CPU there (`ColVariableSolution::write` + `ColVariable::set_value` + child
+`compute`). Caching reduces it to an `O(|aset|·G)` dot product: on that instance the
+unbounded away-step ran ~55× more iterations in the same wall time, and — because in
+P2 mode the cached value is also the *consistent* one — the bounded-active-set and
+BPCG variants went from **not converging** to converging to the same optimum (with
+the bounded active set then beating vanilla).
 
 Status: implemented and validated (away-step + BPCG, dedup, limited active set
 with aggregation, cached argmax). 72 base combos + 32 with cap (incl.
 `intMaxAtoms=5`) + 32 with caching: `|aset|` at the cap, `x` exact, converges.
 TODO perf (postponed): full gram matrix (`active_set_quadratic`) → argmax
 `O(|aset|²)` instead of `O(|aset|·G)`, useful for large G if the argmax dominates.
+
+### 4.ter Optimizing the atom weights: the fully-corrective step (design, post-v1)
+
+The active-set variants update the weights `λ` by a single 1-D step (away /
+pairwise line search). A stronger alternative is the **fully-corrective** step:
+re-optimize *all* the weights over the current active set, i.e. solve the
+**restricted master problem** (RMP)
+
+```
+min_λ  F( Σ_i λ_i a_i )   s.t.  λ ≥ 0,  Σ_i λ_i = 1 ,
+```
+
+which is exactly the **Dantzig-Wolfe / simplicial-decomposition master**: the
+oracle generates the columns `a_i`, the RMP recombines them optimally. It is the
+natural strong companion of the (P2)/`eObjCvxComb` value, and pays off precisely
+when the oracle (LMO) dominates the cost — fewer outer iterations ⇒ fewer oracle
+calls. (The motivating `ThermalUnitBlock` cross-check converges very slowly under
+vanilla FW with a tight tolerance, which this would cure.)
+
+For a quadratic father the RMP is a **simplex-constrained QP** in `m = |active
+set|` variables:
+
+```
+min_λ  ½ λᵀ H λ + bᵀλ ,  λ ∈ Δ ,   H = 2 PᵀAP ,  b = Pᵀβ + c ,
+```
+
+with `P = [a_1 … a_m]` the atoms (`Atom::f_val`), `A` the father Hessian, `β` its
+linear part, `c` the atom costs (`Atom::f_ci`, the (P2) child term). `H` is the
+**Gram matrix of the atoms in the `A`-metric** — the `active_set_quadratic` of
+§4.bis — and is **dense** (`H_kl = 2 Σ_p A_pp a_k[p] a_l[p]`): the same family of
+dense, simplex-constrained QP that bundle-method masters solve. It would be
+exposed as a new `intAlgorithm` value (fully-corrective / simplicial
+decomposition), reusing the existing atom / `f_ci` / `f_val` / aggregation
+machinery, with an on/off algorithmic parameter.
+
+**Decision (suspended).** Solving this RMP well requires a **specialized,
+*reoptimizing* simplex-QP solver**: the active set changes by one column per
+iteration, exactly the reoptimization pattern such solvers exploit (there is no
+separable shortcut — the master is dense regardless of the father's Hessian
+structure). The plan is to reuse **`QPPnltMP`** (`BundleSolver/NdoFiOracle`),
+which is precisely such a solver and very efficient at reoptimization, once it has
+been modernized and properly interfaced (a separate task); afterwards, different
+master schemes (e.g. FISTA or others) may be tried on top of it. **This work is
+therefore suspended** until that QP solver is available — at which point wiring it
+in here is almost free.
 
 ---
 
@@ -579,7 +643,7 @@ Factory: `SMSpp_insert_in_factory_h` (header), `SMSpp_insert_in_factory_cpp_0(
 FrankWolfeSolver )` (cpp). Makefile macro prefix: `FWSlv` (in the style of
 `StcBlk`, `SDDPBk`, `MILP`).
 
-### Parameters (8-point system, §7 of the primer)
+### Parameters (8-point system)
 
 The names do not have the `FWSlv` infix: being in the ComputeConfig of a
 `FrankWolfeSolver` it is obvious they are its own (unlike LDS, where the names
@@ -612,7 +676,8 @@ Each tester builds a father Block with a simple objective
 (`QuadFunction`/`DQuadFunction` or `PolyhedralFunction`) on top of one or more
 "base" Blocks of the same type:
 
-- `MCFBlock`, `ThermalUnitBlock` (`UCBlock`), `BinaryKnapsackBlock`.
+- `MCFBlock`, `BinaryKnapsackBlock`, or any base Block exposing a `:Solver` usable
+  as its LMO.
 
 This way the same Block is solvable by multiple `:Solver`s and they are compared.
 
@@ -626,7 +691,7 @@ value:
 | linear / `PolyhedralFunction` | even integer | equal (vertices of the hull are integer) | `Exact` (but see caveat below) |
 | quadratic (`DQuad`/`Quad`) | **continuous** (e.g. `MCFBlock`) | equal (conv = the region itself) | `Exact` |
 | quadratic | generic integer (Knapsack) | FW = relaxation ≤ integer optimum | `LowerBound` (bound, not equality) |
-| quadratic | `ThermalUnitBlock` DP form. (P/C) | **equal**: the DP describes the convex hull of the integer solutions | `Exact` |
+| quadratic | integer child whose tight relaxation = the integer convex hull | **equal**: the relaxation describes conv of the integer solutions | `Exact` |
 
 Order of the tests: **(1) continuous `MCFBlock` + `DQuadFunction` father** → mode
 `LMOLinear`, exact line search, cross-check `Exact` (first test, done); (2)
@@ -634,9 +699,10 @@ Order of the tests: **(1) continuous `MCFBlock` + `DQuadFunction` father** → m
 `F` nondifferentiable ⇒ **no guarantee of global convergence**, F-W runs but may
 not reach the optimum; therefore test (2) is not an `Exact` cross-check but an
 empirical verification (and `get_lb`/`get_ub` give a valid bracket that may not
-close). No smoothing implemented. (3) `ThermalUnitBlock` with DP formulation (P/C)
-+ quadratic father → `Exact`, because the DP characterizes the convex hull of the
-integer solutions. One step at a time.
+close). No smoothing implemented. (3) an integer base Block whose tight
+(continuous) relaxation characterizes its integer convex hull + quadratic father
+→ `Exact`, because that relaxation describes conv of the integer solutions (the
+Block-specific instantiation lives in the tester). One step at a time.
 
 **Solver-agnostic, all via configuration**: the C++ code of the tester **makes no
 assumption** about which `:Solver`s are attached — neither to the sub-Blocks, nor
@@ -681,7 +747,7 @@ along the "independence from the Block type" axis:
 
 - **`test-mcf.cpp` (MCF-specific)** — exercises the changes of the **feasible
   region**, which intrinsically require knowing the type: it builds `-k` `MCFBlock`
-  under a `DQuad` father, and in random rounds (style of `tests/MCF_MILP`) it
+  under a `DQuad` father, and in random rounds (style of `tests/MCFBlock`) it
   changes **costs** (`chg_costs` → objective change), **capacities** (`chg_ucaps` →
   region change) or **fixes/unfixes** an arc (closure/reopening = `VariableMod`
   that restricts/relaxes), always with `eModBlck, eModBlck` and clean integer

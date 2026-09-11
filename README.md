@@ -60,10 +60,9 @@ either of two distinct problems over the same feasible region `X`:
 The two coincide when the sub-`Block` objectives are linear; they differ for
 nonlinear (e.g. quadratic) `h_j`, where convexity gives `(P2) >= (P1)`, so (P2)
 is the *stronger* relaxation. When `conv(X_j)` is the convex hull of the integer
-solutions of a sub-`Block` and `h_j` is a convex-quadratic cost, (P2) is exactly
-the value of the perspective reformulation / perspective-cut (P/C) bound of that
-sub-`Block` — so `FrankWolfeSolver` can be used as a decomposition alternative to
-an explicit Dantzig-Wolfe / P/C reformulation. The oracle is identical in the two
+solutions of a sub-`Block`, (P2) is exactly the Dantzig-Wolfe bound over that
+hull — so `FrankWolfeSolver` can be used as a decomposition alternative to an
+explicit Dantzig-Wolfe reformulation. The oracle is identical in the two
 modes; only the value / gap / line-search bookkeeping differs, and the
 convex-combination value is linear in the step, hence obtained for free. See the
 documentation of `intCvxComb` (and the GENERAL NOTES of the class) for the full
@@ -80,8 +79,8 @@ These instructions will let you build `FrankWolfeSolver`.
 - [SMS++ core library](https://gitlab.com/smspp/smspp)
 
 It's not a build requirement but you will need a SMS++ `:Solver` to register to
-each sub-`Block` as its LMO (e.g. an `MCFSolver` for an `MCFBlock`, a
-`ThermalUnitDPSolver` for a `ThermalUnitBlock`, or a generic `:MILPSolver`).
+each sub-`Block` as its LMO (e.g. an `MCFSolver` for an `MCFBlock`, or a generic
+`:MILPSolver`).
 
 
 ### Build and install with CMake
