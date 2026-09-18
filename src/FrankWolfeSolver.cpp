@@ -304,13 +304,13 @@ void FrankWolfeSolver::set_Block( Block * block )
 
  // the father Block must have no Variable and no Constraint of its own- - - -
 
- if( ( ! block->get_static_variables().empty() ) ||
-     ( ! block->get_dynamic_variables().empty() ) )
+ if( ( ! block->get_static_variable_groups().empty() ) ||
+     ( ! block->get_dynamic_variable_groups().empty() ) )
   throw( std::invalid_argument(
    "FrankWolfeSolver: the father Block must have no Variable of its own" ) );
 
- if( ( ! block->get_static_constraints().empty() ) ||
-     ( ! block->get_dynamic_constraints().empty() ) )
+ if( ( ! block->get_static_constraint_groups().empty() ) ||
+     ( ! block->get_dynamic_constraint_groups().empty() ) )
   throw( std::invalid_argument(
    "FrankWolfeSolver: the father Block must have no Constraint of its own" ) );
 
