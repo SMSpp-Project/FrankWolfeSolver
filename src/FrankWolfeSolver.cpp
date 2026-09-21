@@ -112,6 +112,21 @@ void FrankWolfeSolver::cleanup( void )
  if( f_modified )
   restore_objectives( true );
 
+ // take back out of the sub-Block Objective the Variable that were put there
+ // to give the Oracle the gradient of the father [see analyze_subBlocks()],
+ // so that the Block is left as it was found; quiet, for the same reason
+ // restore_objectives() is quiet here
+ for( auto & d : v_sb )
+  for( auto var : d.added ) {
+   const Index i = d.fun->is_active( var );
+   if( i >= d.fun->get_num_active_var() )
+    continue;
+   if( d.dq )
+    d.dq->remove_variable( i , eNoMod );
+   else
+    d.lin->remove_variable( i , eNoMod );
+   }
+
  v_sb.clear();
  f_grad.clear();
  f_xval.clear();
@@ -380,16 +395,30 @@ void FrankWolfeSolver::analyze_subBlocks( void )
   throw( std::invalid_argument(
    "FrankWolfeSolver: the father Block has no sub-Block" ) );
 
- // scan the sub-Block: validate the objectives, snapshot the original linear
- // coefficients, and record the position of each variable in its objective - -
+ // scan the sub-Block: validate the objectives and record the position each
+ // of their variables has in them - - - - - - - - - - - - - - - - - - - - - -
+
+ // what was added to which sub-Block Objective survives a re-analysis: the
+ // Variable are still there, hence they are found among the active ones
+ // below, but this Solver has to keep knowing that they are its own and that
+ // it has to take them back out when it detaches
+ std::unordered_map< const Block * , std::vector< Variable * > > was_added;
+ for( auto & d : v_sb )
+  if( ! d.added.empty() )
+   was_added[ d.block ] = std::move( d.added );
 
  v_sb.clear();
  v_sb.resize( f_nsb );
  std::unordered_map< Variable * , std::pair< Index , Index > > var2pos;
+ std::unordered_map< const Block * , Index > blk2sb;
 
  for( Index j = 0 ; j < f_nsb ; ++j ) {
   auto & d = v_sb[ j ];
   d.block = sb[ j ];
+  blk2sb[ d.block ] = j;
+
+  if( auto it = was_added.find( d.block ) ; it != was_added.end() )
+   d.added = std::move( it->second );
 
   d.obj = dynamic_cast< FRealObjective * >( d.block->get_objective() );
   if( ! d.obj )
@@ -408,28 +437,76 @@ void FrankWolfeSolver::analyze_subBlocks( void )
     "sense differs from the father one" ) );
 
   Index n = d.fun->get_num_active_var();
-  d.c0.resize( n );
-  for( Index i = 0 ; i < n ; ++i ) {
-   d.c0[ i ] = d.dq ? d.dq->get_linear_coefficient( i )
-                    : d.lin->get_coefficient( i );
+  for( Index i = 0 ; i < n ; ++i )
    var2pos[ d.fun->get_active_var( i ) ] = { j , i };
-   }
   }
 
- // build the gradient-to-sub-Block scatter map: every active variable of the
- // father Objective must be active in (exactly) one sub-Block Objective - - -
+ // the father-Objective Variable that no sub-Block Objective prices - - - - -
+ //
+ // Such a Variable belongs to a sub-Block all the same, the Block it is of
+ // saying which one, and it is the Oracle of that sub-Block that has to price
+ // it: it is therefore added to the Objective of that sub-Block with a zero
+ // coefficient, which leaves the problem the Oracle solves unchanged while
+ // giving this Solver somewhere to scatter the gradient. The addition is
+ // undone when this Solver detaches [see cleanup()]. A Variable of no
+ // sub-Block, on the other hand, is one the decomposition cannot move, and
+ // there is nothing to be done with it.
 
  Index G = f_fun->get_num_active_var();
+
+ for( Index p = 0 ; p < G ; ++p ) {
+  auto var = f_fun->get_active_var( p );
+  if( var2pos.count( var ) )
+   continue;
+
+  // the sub-Block the Variable is of, i.e. the Block of it, or whichever of
+  // its ancestors is a son of the father
+  Index j = Inf< Index >();
+  for( auto b = var->get_Block() ; b ; b = b->get_f_Block() )
+   if( auto it = blk2sb.find( b ) ; it != blk2sb.end() ) {
+    j = it->second;
+    break;
+    }
+
+  if( j == Inf< Index >() )
+   throw( std::invalid_argument( "FrankWolfeSolver: a father-Objective "
+    "Variable is of no sub-Block" ) );
+
+  auto & d = v_sb[ j ];
+  auto cvar = dynamic_cast< ColVariable * >( var );
+  if( ! cvar )
+   throw( std::invalid_argument( "FrankWolfeSolver: a father-Objective "
+    "Variable is not a ColVariable" ) );
+
+  const Index i = d.fun->get_num_active_var();
+  if( d.dq )
+   d.dq->add_variable( cvar , 0 , 0 );
+  else
+   d.lin->add_variable( cvar , 0 );
+
+  d.added.push_back( var );
+  var2pos[ var ] = { j , i };
+  }
+
+ // snapshot the original linear coefficients, the ones just added comprised,
+ // and build the gradient-to-sub-Block scatter map - - - - - - - - - - - - -
+
+ for( Index j = 0 ; j < f_nsb ; ++j ) {
+  auto & d = v_sb[ j ];
+  Index n = d.fun->get_num_active_var();
+  d.c0.resize( n );
+  for( Index i = 0 ; i < n ; ++i )
+   d.c0[ i ] = d.dq ? d.dq->get_linear_coefficient( i )
+                    : d.lin->get_coefficient( i );
+  }
+
  f_grad.resize( G );
 
  for( Index p = 0 ; p < G ; ++p ) {
-  auto it = var2pos.find( f_fun->get_active_var( p ) );
-  if( it == var2pos.end() )
-   throw( std::invalid_argument( "FrankWolfeSolver: a father-Objective "
-    "variable is not active in any sub-Block Objective" ) );
-  auto & d = v_sb[ it->second.first ];
+  auto & pos = var2pos[ f_fun->get_active_var( p ) ];
+  auto & d = v_sb[ pos.first ];
   d.grad_idx.push_back( p );
-  d.obj_idx.push_back( it->second.second );
+  d.obj_idx.push_back( pos.second );
   }
 
  f_xval.resize( G );

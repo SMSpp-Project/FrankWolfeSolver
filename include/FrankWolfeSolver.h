@@ -462,6 +462,15 @@ class FrankWolfeSolver : public CDASolver
   /// snapshot of the original linear coefficients c_j (objective order)
   std::vector< Function::FunctionValue > c0;
 
+  /// the Variable this Solver added to the Objective of the sub-Block
+  /** A Variable of the father Objective that the Objective of its sub-Block
+   * does not price is added to it with a zero coefficient, so that the Oracle
+   * of that sub-Block sees the gradient this Solver scatters onto it; nothing
+   * of the problem changes, and the addition is undone when this Solver
+   * detaches [see cleanup()]. */
+
+  std::vector< Variable * > added;
+
   /// objective-order indices of the variables touched by the father gradient
   std::vector< Block::Index > obj_idx;
   /// father-gradient positions matching obj_idx (parallel vector)

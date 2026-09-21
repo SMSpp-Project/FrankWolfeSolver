@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- a Variable of the father Objective that the Objective of its sub-Block does
+  not price is no longer refused: what says which sub-Block it belongs to is
+  the Block it is of, and the Objective of that sub-Block is where it is
+  added, with a zero coefficient, so that the Oracle sees the gradient that is
+  scattered onto it. Nothing of the problem changes, and the addition is
+  undone when the Solver detaches, so that the Block is left as it was found.
+  What is refused is only a Variable of no sub-Block at all, which the
+  decomposition cannot move
+
 ### Fixed
 
 ## [0.2.0] - 2026-09-12
