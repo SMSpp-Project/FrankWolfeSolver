@@ -461,8 +461,9 @@ class FrankWolfeSolver : public CDASolver
   ///< the BlockSolverConfig of the Solver of the master of eDirBundleMP
   /**< The name of the file describing the BlockSolverConfig of the Solver
    * that solves the master problem of intFWDirection == eDirBundleMP, which
-   * is a quadratic program. Empty (the default) leaves the master to pick
-   * its own. Has no effect under the other directions. */
+   * is a quadratic program. It is required by that direction, the master
+   * having no Solver of its own to fall back on, and compute() throws if it
+   * is not given; it has no effect under the other directions. */
 
   strLastParFWSlv  ///< first allowed parameter value for derived classes
   };

@@ -803,6 +803,11 @@ void FrankWolfeSolver::build_master( void )
   * the space of the "active" Variable of the linking function, which is the
   * space the gradients live in. */
 
+ if( f_mpb_cfg.empty() )
+  throw( std::logic_error( "FrankWolfeSolver: the direction of eDirBundleMP "
+                           "comes from a master problem, which needs the "
+                           "BlockSolverConfig of a Solver [strFWMPBCfg]" ) );
+
  f_mpb = new MasterProblemBlock();
 
  f_mpb->configure( true ,                        // the primal form
