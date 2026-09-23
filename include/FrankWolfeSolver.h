@@ -37,13 +37,80 @@
  *  A. Frangioni, F. Rinaldi "Bundle-inspired Direction Formulae for
  *  Conditional Gradient Methods", draft
  *
+ * Those formulae, in the notation of this solver, are the following. Write
+ * \f$ \bar{x}^k \f$ for the current iterate, \f$ \bar{g}^k =
+ * \nabla f( \bar{x}^k ) \f$ for the gradient of the linking function there,
+ * \f$ \bar{x}^{k-1} \f$ and \f$ \bar{g}^{k-1} \f$ for the same at the
+ * previous iterate, and \f$ x^k \f$ and \f$ g^k \f$ for the vertex the
+ * oracle has returned and the gradient there. The translated function
+ * \f[ h^k( d ) = f( \bar{x}^k + d ) - f( \bar{x}^k ) \f]
+ * has \f$ h^k( 0 ) = 0 \f$ and, by convexity, is bounded below by each of
+ * the three linear functions
+ * \f[ \bar{l}^k( d ) = \bar{g}^k d \quad , \quad
+ *     \bar{l}^{k-1}( d ) = \bar{g}^{k-1} d - \bar{\alpha}^{k-1} \quad ,
+ *     \quad l^k( d ) = g^k d - \alpha^k \f]
+ * whose constants are the linearization errors at the current iterate,
+ * \f[ \bar{\alpha}^{k-1} = f( \bar{x}^k ) - f( \bar{x}^{k-1} )
+ *      - \bar{g}^{k-1} ( \bar{x}^k - \bar{x}^{k-1} ) \quad , \quad
+ *     \alpha^k = f( \bar{x}^k ) - f( x^k ) - g^k ( \bar{x}^k - x^k ) \f]
+ * both non-negative, the first one being 0 for the gradient taken at the
+ * iterate itself. The by-the-book method keeps \f$ \bar{l}^k \f$ alone; the
+ * piecewise-linear model
+ * \f$ \check{h}^k( d ) = \max \{ \bar{l}^k( d ) , \bar{l}^{k-1}( d ) ,
+ * l^k( d ) \} \leq h^k( d ) \f$ uses all of them, and a stabilizing term
+ * makes it into the master problem
+ * \f[ \min \{ v + \frac{1}{2t} \| d \|^2 \; : \;
+ *     v \geq \bar{g}^k d \; , \;
+ *     v \geq \bar{g}^{k-1} d - \bar{\alpha}^{k-1} \; , \;
+ *     v \geq g^k d - \alpha^k \} \f]
+ * a convex quadratic program in the direction \f$ d \f$ and one further
+ * variable. Its dual is the problem of finding the convex multipliers
+ * \f$ \theta \f$ that minimize
+ * \f[ \bar{\alpha}^{k-1} \bar{\theta}^{k-1} + \alpha^k \theta^k
+ *     + \frac{t}{2} \| \bar{g}^{k-1} \bar{\theta}^{k-1} + g^k \theta^k
+ *     + \bar{g}^k \bar{\theta}^k \|^2 \f]
+ * and the two are tied by \f$ d_*^k = - t z_*^k \f$, with
+ * \f[ z_*^k = \bar{g}^{k-1} \bar{\theta}^{k-1} + g^k \theta^k
+ *             + \bar{g}^k \bar{\theta}^k \quad , \quad
+ *     \alpha_*^k = \bar{\alpha}^{k-1} \bar{\theta}^{k-1}
+ *                   + \alpha^k \theta^k \f]
+ * so that \f$ z_*^k \in \partial_{\alpha_*^k} f( \bar{x}^k ) \f$: what
+ * the oracle is given is an approximate subgradient of the linking function
+ * at the current iterate, and a positive multiple of a direction is the same
+ * direction for it. The by-the-book choice is the feasible special case
+ * \f$ \bar{\theta}^k = 1 \f$, i.e., \f$ z_*^k = \bar{g}^k \f$.
+ *
+ * The stabilization decides between the two ends: the larger \f$ t \f$ is,
+ * the more the norm weighs and the more the direction is the least-norm
+ * combination of the gradients at hand, whatever their linearization errors;
+ * the smaller it is, the more those errors matter, and as \f$ t \to 0 \f$
+ * the gradient is recovered. Since \f$ z_*^k \f$ is an approximate
+ * subgradient of the same kind as the pieces it combines, it can take their
+ * place in the model of the next iteration without changing the solution of
+ * the master, which is what allows keeping a bundle of any size and
+ * compressing it to one pair.
+ *
+ * Of this, intFWDirection == eDirBundle implements the two pieces
+ * \f$ ( \bar{g}^k , 0 ) \f$ and
+ * \f$ ( \bar{g}^{k-1} , \bar{\alpha}^{k-1} ) \f$, for which the master
+ * is solved in closed form: with \f$ d = \bar{g}^{k-1} - \bar{g}^k \f$,
+ * \f[ \bar{\theta}^{k-1} = \min \{ 1 , \max \{ 0 ,
+ *      - ( t \, \bar{g}^k d + \bar{\alpha}^{k-1} ) /
+ *        ( t \| d \|^2 ) \} \} \f]
+ * and \f$ z_*^k = \bar{g}^k + \bar{\theta}^{k-1} d \f$. Neither piece
+ * costs an evaluation: both are information the method has already paid for.
+ *
  * See FrankWolfeSolver/frank-wolfe-design.md for the full design.
  *
  * \author Antonio Frangioni \n
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \copyright &copy; by Antonio Frangioni
+ * \author Donato Meoli \n
+ *         Dipartimento di Informatica \n
+ *         Universita' di Pisa \n
+ *
+ * \copyright &copy; by Antonio Frangioni, Donato Meoli
  */
 /*--------------------------------------------------------------------------*/
 /*----------------------------- DEFINITIONS --------------------------------*/
@@ -185,6 +252,13 @@ class FrankWolfeSolver : public CDASolver
   LSExact    = 2   ///< exact line search (requires a quadratic total objective)
   };
 
+ /// which direction the oracle is given (value of intFWDirection)
+ enum direction_type {
+  eDirGradient = 0 ,  ///< the gradient at the current iterate
+  eDirBundle   = 1    ///< the solution of a stabilized master problem
+  };
+
+/*--------------------------------------------------------------------------*/
  /// which Frank-Wolfe variant to run (value of intAlgorithm)
  enum algo_type {
   AlgVanilla  = 0 , ///< vanilla Frank-Wolfe (no active set)
@@ -325,7 +399,46 @@ class FrankWolfeSolver : public CDASolver
    * feasibility re-check); v1 cold-starts each compute(), so the two modes
    * differ only in how much of the (cheap) structural cache is rebuilt. */
 
+  intFWDirection ,
+  ///< which direction the solver gives the oracle
+  /**< Selects what is passed to the LMO in place of the objective, one of the
+   * direction_type values:
+   *
+   * - eDirGradient (default): the gradient of the linking function at the
+   *   current iterate, i.e. the by-the-book method, which reduces the
+   *   function to its first-order model at that point;
+   *
+   * - eDirBundle: the solution of a stabilized master problem built out of
+   *   the first-order information already at hand, i.e. the current gradient
+   *   (whose linearization error at the current iterate is 0) together with
+   *   the one of the previous iterate, carried forward with its error. The
+   *   direction is then a convex combination of the two, hence an approximate
+   *   subgradient of the linking function at the current iterate, and the
+   *   weight of the older one grows with dblFWt. eDirGradient is the special
+   *   case in which that weight is 0, which is what dblFWt = 0 gives.
+   *
+   * The information the second mode uses is the one the method has already
+   * paid for: no evaluation is added [see the file documentation for where
+   * these formulae come from]. */
+
   intLastParFWSlv  ///< first allowed parameter value for derived classes
+  };
+
+/*--------------------------------------------------------------------------*/
+ /// public enum "extending" dbl_par_type_CDAS to FrankWolfeSolver
+
+ enum dbl_par_type_FWSlv {
+  dblFWt = dblLastParCDAS ,
+  ///< how much the master problem of eDirBundle is stabilized
+  /**< The weight of the squared norm in the master problem that gives the
+   * direction when intFWDirection is eDirBundle. The larger it is, the more
+   * the direction is the least-norm combination of the gradients at hand,
+   * whatever their linearization errors; the smaller it is, the more those
+   * errors matter, and with 0 the direction is the gradient at the current
+   * iterate, i.e. the by-the-book method. It has no effect under
+   * eDirGradient. Default 1. */
+
+  dblLastParFWSlv  ///< first allowed parameter value for derived classes
   };
 
 /** @} ---------------------------------------------------------------------*/
@@ -401,7 +514,21 @@ class FrankWolfeSolver : public CDASolver
 
 /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
 
+ [[nodiscard]] double get_dflt_dbl_par( idx_type par ) const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
  [[nodiscard]] idx_type int_par_str2idx( const std::string & name )
+  const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] idx_type dbl_par_str2idx( const std::string & name )
+  const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] const std::string & dbl_par_idx2str( idx_type idx )
   const override;
 
 /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -562,6 +689,19 @@ class FrankWolfeSolver : public CDASolver
  /// acquire, for each sub-Block, the LMO :Solver at index intLMOSlvr
  void acquire_LMOs( void );
 
+ /// the direction the oracle is given, out of the information at hand
+ /** With intFWDirection == eDirBundle, replaces the direction the oracle is
+  * given with the solution of the stabilized master problem built out of the
+  * gradient at the current iterate, whose linearization error there is 0, and
+  * the one of the previous iterate carried forward with its own error; with
+  * two of them the master is solved in closed form. It then records the
+  * current pair as the previous one for the next iteration. Takes the value
+  * of the linking function at the current iterate, and expects f_xval to hold
+  * that iterate. Does nothing under eDirGradient. */
+
+ void bundle_direction( OFValue fx );
+
+/*--------------------------------------------------------------------------*/
  /// evaluate the father Objective at the current point and fill f_grad
  void evaluate_gradient( void );
 
@@ -618,6 +758,8 @@ class FrankWolfeSolver : public CDASolver
  int f_max_atoms;      ///< intMaxAtoms
  int f_cvx_comb;       ///< intCvxComb (eObjAtX / eObjCvxComb)
  int f_handle_mod;     ///< intHandleMod (eModReset / eModFine)
+ int f_direction;      ///< intFWDirection (eDirGradient / eDirBundle)
+ double f_t;           ///< dblFWt, the stabilization of that master problem
  int f_max_thread;     ///< intMaxThread
  int f_max_iter;       ///< intMaxIter
  double f_max_time;    ///< dblMaxTime
@@ -650,6 +792,16 @@ class FrankWolfeSolver : public CDASolver
  std::vector< SubBlockData > v_sb;  ///< per-sub-Block bookkeeping
 
  std::vector< Function::FunctionValue > f_grad;  ///< father gradient buffer
+
+ std::vector< Function::FunctionValue > f_bdir;
+ ///< the direction of eDirBundle, when it is not the gradient itself
+
+ const std::vector< Function::FunctionValue > * p_dir = nullptr;
+ ///< what scatter() gives the oracle: f_grad, or f_bdir under eDirBundle
+
+ std::vector< Function::FunctionValue > f_pgrad;  ///< gradient of the previous
+ std::vector< Function::FunctionValue > f_pxval;  ///< iterate it was taken at
+ OFValue f_pval = 0;                              ///< value of the function there
  std::vector< Function::FunctionValue > f_xval;  ///< father active-var values at x
  std::vector< Function::FunctionValue > f_vval;  ///< father active-var values at v
 

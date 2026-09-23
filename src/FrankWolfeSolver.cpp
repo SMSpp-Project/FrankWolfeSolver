@@ -13,7 +13,11 @@
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \copyright &copy; by Antonio Frangioni
+ * \author Donato Meoli \n
+ *         Dipartimento di Informatica \n
+ *         Universita' di Pisa \n
+ *
+ * \copyright &copy; by Antonio Frangioni, Donato Meoli
  */
 /*--------------------------------------------------------------------------*/
 /*------------------------------ INCLUDES ----------------------------------*/
@@ -65,8 +69,12 @@ SMSpp_insert_in_factory_cpp_0( FrankWolfeSolver );
 
 static const std::vector< std::string > FWSlv_int_pars_str = {
  "intLMOObj" , "intLineSearch" , "intLMOSlvr" , "intAlgorithm" , "intMaxAtoms" ,
- "intCvxComb" , "intHandleMod"
+ "intCvxComb" , "intHandleMod" , "intFWDirection"
  };
+
+/*--------------------------------------------------------------------------*/
+
+static const std::vector< std::string > FWSlv_dbl_pars_str = { "dblFWt" };
 
 /*--------------------------------------------------------------------------*/
 /*---------------------------- AUXILIARY ROUTINES --------------------------*/
@@ -81,6 +89,8 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_max_atoms   = get_dflt_int_par( intMaxAtoms );
  f_cvx_comb    = get_dflt_int_par( intCvxComb );
  f_handle_mod  = get_dflt_int_par( intHandleMod );
+ f_direction   = get_dflt_int_par( intFWDirection );
+ f_t           = get_dflt_dbl_par( dblFWt );
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
  f_max_time    = get_dflt_dbl_par( dblMaxTime );
@@ -543,6 +553,12 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
   case( intMaxAtoms ):   f_max_atoms = value;   return;
   case( intCvxComb ):    f_cvx_comb = value;    return;
   case( intHandleMod ):  f_handle_mod = value;  return;
+  case( intFWDirection ):
+   if( ( value < eDirGradient ) || ( value > eDirBundle ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWDirection "
+                                  "must be either 0 or 1" ) );
+   f_direction = value;
+   return;
   case( intMaxThread ):  f_max_thread = value;  return;
   case( intMaxIter ):    f_max_iter = value;    return;
   case( intLogVerb ):    f_log_verb = value;    return;
@@ -560,6 +576,12 @@ void FrankWolfeSolver::set_par( idx_type par , double value )
   case( dblRelAcc ):   f_rel_acc = value;  return;
   case( dblAbsAcc ):   f_abs_acc = value;  return;
   case( dblEveryTTm ): f_every_t = value; return;
+  case( dblFWt ):
+   if( value < 0 )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: dblFWt must be "
+                                  "non-negative" ) );
+   f_t = value;
+   return;
   default:             CDASolver::set_par( par , value );
   }
  }
@@ -576,6 +598,7 @@ int FrankWolfeSolver::get_dflt_int_par( idx_type par ) const
   case( intMaxAtoms ):   return( 0 );
   case( intCvxComb ):    return( eObjCvxComb );
   case( intHandleMod ):  return( eModReset );
+  case( intFWDirection ): return( eDirGradient );
   default:               return( CDASolver::get_dflt_int_par( par ) );
   }
  }
@@ -592,6 +615,7 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intMaxAtoms ):   return( f_max_atoms );
   case( intCvxComb ):    return( f_cvx_comb );
   case( intHandleMod ):  return( f_handle_mod );
+  case( intFWDirection ): return( f_direction );
   case( intMaxThread ):  return( f_max_thread );
   case( intMaxIter ):    return( f_max_iter );
   case( intLogVerb ):    return( f_log_verb );
@@ -609,8 +633,41 @@ double FrankWolfeSolver::get_dbl_par( idx_type par ) const
   case( dblRelAcc ):   return( f_rel_acc );
   case( dblAbsAcc ):   return( f_abs_acc );
   case( dblEveryTTm ): return( f_every_t );
+  case( dblFWt ):      return( f_t );
   default:             return( CDASolver::get_dbl_par( par ) );
   }
+ }
+
+/*--------------------------------------------------------------------------*/
+
+double FrankWolfeSolver::get_dflt_dbl_par( idx_type par ) const
+{
+ if( par == dblFWt )
+  return( 1 );
+
+ return( CDASolver::get_dflt_dbl_par( par ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+Solver::idx_type FrankWolfeSolver::dbl_par_str2idx( const std::string & name )
+ const
+{
+ for( idx_type i = 0 ; i < FWSlv_dbl_pars_str.size() ; ++i )
+  if( name == FWSlv_dbl_pars_str[ i ] )
+   return( dblLastParCDAS + i );
+
+ return( CDASolver::dbl_par_str2idx( name ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+const std::string & FrankWolfeSolver::dbl_par_idx2str( idx_type idx ) const
+{
+ if( ( idx >= dblLastParCDAS ) && ( idx < dblLastParFWSlv ) )
+  return( FWSlv_dbl_pars_str[ idx - dblLastParCDAS ] );
+
+ return( CDASolver::dbl_par_idx2str( idx ) );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -674,12 +731,83 @@ void FrankWolfeSolver::evaluate_gradient( void )
 
 /*--------------------------------------------------------------------------*/
 
+void FrankWolfeSolver::bundle_direction( OFValue fx )
+{
+ if( f_direction != eDirBundle ) {
+  p_dir = & f_grad;
+  return;
+  }
+
+ const Index G = Index( f_grad.size() );
+
+ /* The master problem of the two pieces (g, 0) at the current iterate and
+  * (gp, alpha) at the previous one is, in its dual form,
+  *
+  *   min { alpha theta + ( t / 2 ) || g + theta ( gp - g ) ||^2 :
+  *         theta in [ 0 , 1 ] }
+  *
+  * whose solution is written down at once. With theta = 0 the direction is
+  * the gradient, i.e. the by-the-book method, which is what a t of 0, a
+  * first iteration or two gradients that agree give. */
+
+ if( ( ! f_pgrad.empty() ) && ( f_t > 0 ) ) {
+  // the linearization error of the previous gradient at the current iterate,
+  // which convexity makes non-negative: what is below 0 is numerical noise
+  OFValue alpha = fx - f_pval;
+  for( Index p = 0 ; p < G ; ++p )
+   alpha -= f_pgrad[ p ] * ( f_xval[ p ] - f_pxval[ p ] );
+  if( alpha < 0 )
+   alpha = 0;
+
+  OFValue gd = 0 , dd = 0;
+  for( Index p = 0 ; p < G ; ++p ) {
+   const auto di = f_pgrad[ p ] - f_grad[ p ];
+   gd += f_grad[ p ] * di;
+   dd += di * di;
+   }
+
+  OFValue theta = 0;
+  if( dd > 0 ) {
+   theta = - ( f_t * gd + alpha ) / ( f_t * dd );
+   if( theta < 0 )
+    theta = 0;
+   else
+    if( theta > 1 )
+     theta = 1;
+   }
+
+  if( theta > 0 ) {
+   f_bdir.resize( G );
+   for( Index p = 0 ; p < G ; ++p )
+    f_bdir[ p ] = f_grad[ p ] + theta * ( f_pgrad[ p ] - f_grad[ p ] );
+   p_dir = & f_bdir;
+   }
+  else
+   p_dir = & f_grad;
+  }
+ else
+  p_dir = & f_grad;
+
+ // whatever the direction, what is recorded for the next iteration is the
+ // gradient as it is, together with the point it was taken at and the value
+ // of the function there
+ f_pgrad = f_grad;
+ f_pxval = f_xval;
+ f_pval = fx;
+ }
+
+/*--------------------------------------------------------------------------*/
+
 void FrankWolfeSolver::scatter( void )
 {
  // write alpha * c_j + g_j into the linear coefficients of each sub-Block
  // Objective; the quadratic part (if any) is left untouched
 
  const bool alpha = ( f_lmo_obj == LMOFull );
+
+ // what the oracle is given is the gradient unless a direction has been
+ // built out of more than it [see bundle_direction()]
+ const auto & dir = p_dir ? *p_dir : f_grad;
 
  for( auto & d : v_sb ) {
   Index n = Index( d.c0.size() );
@@ -697,7 +825,7 @@ void FrankWolfeSolver::scatter( void )
    std::vector< std::pair< Index , FunctionValue > > upd( d.obj_idx.size() );
    for( Index k = 0 ; k < d.obj_idx.size() ; ++k )
     upd[ k ] = { d.obj_idx[ k ] ,
-                 d.c0[ d.obj_idx[ k ] ] + f_grad[ d.grad_idx[ k ] ] };
+                 d.c0[ d.obj_idx[ k ] ] + dir[ d.grad_idx[ k ] ] };
    std::sort( upd.begin() , upd.end() );
    Function::Subset nms( upd.size() );
    Function::Vec_FunctionValue nc( upd.size() );
@@ -718,7 +846,7 @@ void FrankWolfeSolver::scatter( void )
    for( Index i = 0 ; i < n ; ++i )
     nc[ i ] = d.c0[ i ];
   for( Index k = 0 ; k < d.obj_idx.size() ; ++k )
-   nc[ d.obj_idx[ k ] ] += f_grad[ d.grad_idx[ k ] ];
+   nc[ d.obj_idx[ k ] ] += dir[ d.grad_idx[ k ] ];
 
   if( d.dq )
    d.dq->modify_linear_coefficients( std::move( nc ) ,
@@ -1258,6 +1386,7 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   }
  else {
   evaluate_gradient();
+  p_dir = & f_grad;          // nothing recorded yet: this is the gradient
   scatter();
   run_LMOs( true );
   if( f_lmo_infeas ) { f_has_sol = false; return( kInfeasible ); }
@@ -1294,10 +1423,11 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   f_x->write( f_Block );
   evaluate_gradient();
   OFValue father_val = f_fun->get_value();
+  capture_father_values( f_xval );
+  bundle_direction( father_val );
   scatter();
 
   OFValue mx_sum = eval_modified_objective();   // sum_j M_j(x_j)
-  capture_father_values( f_xval );
 
   run_LMOs( true );
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
