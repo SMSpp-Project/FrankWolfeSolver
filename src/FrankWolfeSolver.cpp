@@ -69,8 +69,12 @@ SMSpp_insert_in_factory_cpp_0( FrankWolfeSolver );
 
 static const std::vector< std::string > FWSlv_int_pars_str = {
  "intLMOObj" , "intLineSearch" , "intLMOSlvr" , "intAlgorithm" , "intMaxAtoms" ,
- "intCvxComb" , "intHandleMod" , "intFWDirection"
+ "intCvxComb" , "intHandleMod" , "intFWDirection" , "intFWBundleSize"
  };
+
+/*--------------------------------------------------------------------------*/
+
+static const std::vector< std::string > FWSlv_str_pars_str = { "strFWMPBCfg" };
 
 /*--------------------------------------------------------------------------*/
 
@@ -107,6 +111,14 @@ void FrankWolfeSolver::set_default_parameters( void )
 
 void FrankWolfeSolver::cleanup( void )
 {
+ // the master problem of eDirBundleMP goes with the Block it was built for
+ if( f_mpb ) {
+  f_mpb->unregister_Solvers();
+  delete f_mpb;
+  f_mpb = nullptr;
+  f_next_slot = 0;
+  }
+
  // if the sub-Block objectives were modified, restore the original linear
  // coefficients so that the Block is left pristine
 
@@ -554,10 +566,16 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
   case( intCvxComb ):    f_cvx_comb = value;    return;
   case( intHandleMod ):  f_handle_mod = value;  return;
   case( intFWDirection ):
-   if( ( value < eDirGradient ) || ( value > eDirBundle ) )
+   if( ( value < eDirGradient ) || ( value > eDirBundleMP ) )
     throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWDirection "
-                                  "must be either 0 or 1" ) );
+                                  "must be between 0 and 2" ) );
    f_direction = value;
+   return;
+  case( intFWBundleSize ):
+   if( value < 2 )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWBundleSize "
+                                  "must be at least 2" ) );
+   f_bundle_size = value;
    return;
   case( intMaxThread ):  f_max_thread = value;  return;
   case( intMaxIter ):    f_max_iter = value;    return;
@@ -599,6 +617,7 @@ int FrankWolfeSolver::get_dflt_int_par( idx_type par ) const
   case( intCvxComb ):    return( eObjCvxComb );
   case( intHandleMod ):  return( eModReset );
   case( intFWDirection ): return( eDirGradient );
+  case( intFWBundleSize ): return( 10 );
   default:               return( CDASolver::get_dflt_int_par( par ) );
   }
  }
@@ -616,6 +635,7 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intCvxComb ):    return( f_cvx_comb );
   case( intHandleMod ):  return( f_handle_mod );
   case( intFWDirection ): return( f_direction );
+  case( intFWBundleSize ): return( f_bundle_size );
   case( intMaxThread ):  return( f_max_thread );
   case( intMaxIter ):    return( f_max_iter );
   case( intLogVerb ):    return( f_log_verb );
@@ -636,6 +656,50 @@ double FrankWolfeSolver::get_dbl_par( idx_type par ) const
   case( dblFWt ):      return( f_t );
   default:             return( CDASolver::get_dbl_par( par ) );
   }
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::set_par( idx_type par , std::string && value )
+{
+ if( par == strFWMPBCfg ) {
+  f_mpb_cfg = std::move( value );
+  return;
+  }
+
+ CDASolver::set_par( par , std::move( value ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+const std::string & FrankWolfeSolver::get_str_par( idx_type par ) const
+{
+ if( par == strFWMPBCfg )
+  return( f_mpb_cfg );
+
+ return( CDASolver::get_str_par( par ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+Solver::idx_type FrankWolfeSolver::str_par_str2idx( const std::string & name )
+ const
+{
+ for( idx_type i = 0 ; i < FWSlv_str_pars_str.size() ; ++i )
+  if( name == FWSlv_str_pars_str[ i ] )
+   return( strLastParCDAS + i );
+
+ return( CDASolver::str_par_str2idx( name ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+const std::string & FrankWolfeSolver::str_par_idx2str( idx_type idx ) const
+{
+ if( ( idx >= strLastParCDAS ) && ( idx < strLastParFWSlv ) )
+  return( FWSlv_str_pars_str[ idx - strLastParCDAS ] );
+
+ return( CDASolver::str_par_idx2str( idx ) );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -731,8 +795,96 @@ void FrankWolfeSolver::evaluate_gradient( void )
 
 /*--------------------------------------------------------------------------*/
 
+void FrankWolfeSolver::build_master( void )
+{
+ /* One component, the linking function, whose bundle is the pairs the method
+  * produces; the stabilization is the proximal one, which is the master the
+  * formulae of the file documentation are written for. The master works in
+  * the space of the "active" Variable of the linking function, which is the
+  * space the gradients live in. */
+
+ f_mpb = new MasterProblemBlock();
+
+ f_mpb->configure( true ,                        // the primal form
+                   std::max( f_bundle_size , 2 ) ,
+                   int( f_grad.size() ) ,
+                   1 ,                           // one hard component
+                   std::vector< C05Function * >() ,
+                   {} ,
+                   MasterProblemBlock::kProximal ,
+                   ! f_max );
+
+ // no bound on the displacement: the direction is taken for its own sake,
+ // the step being what the line search of the method decides
+ const auto INF = Inf< double >();
+ f_mpb->set_box( std::vector< double >( f_grad.size() , - INF ) ,
+                 std::vector< double >( f_grad.size() , INF ) );
+
+ f_mpb->register_Solver( std::string( f_mpb_cfg ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::master_direction( OFValue fx )
+{
+ if( ! f_mpb )
+  build_master();
+
+ const Index G = Index( f_grad.size() );
+
+ /* The current iterate is the stability centre, and every linearization is
+  * read against it: the master keeps the constants as they are and rebuilds
+  * the errors itself at every reference it is given, which is the property
+  * that makes carrying the older pieces forward free. */
+
+ f_mpb->set_reference( f_xval , std::vector< double >( 1 , double( fx ) ) );
+
+ // the gradient at the current iterate, whose constant is the value of the
+ // function there, i.e. an error of 0 at the centre
+ std::vector< double > g( f_grad.begin() , f_grad.end() );
+ double alpha = double( fx );
+ for( Index p = 0 ; p < G ; ++p )
+  alpha -= g[ p ] * f_xval[ p ];
+
+ if( f_mpb->add_cut( 0 , std::move( g ) , alpha ) < 0 ) {
+  // the bundle is full: the oldest piece makes room for the new one
+  f_mpb->remove_cut( 0 , f_next_slot );
+  std::vector< double > gg( f_grad.begin() , f_grad.end() );
+  f_mpb->add_cut( 0 , f_next_slot , std::move( gg ) , alpha );
+  }
+ f_next_slot = ( f_next_slot + 1 ) % std::max( f_bundle_size , 2 );
+
+ f_mpb->set_t( f_t );
+
+ if( f_mpb->solve_master() < Solver::kOK ) {
+  p_dir = & f_grad;                     // the master says nothing: the
+  return;                               // gradient is always a fallback
+  }
+
+ const auto z = f_mpb->get_aggregated_subgradient( 0 );
+ if( z.size() < G ) {
+  p_dir = & f_grad;
+  return;
+  }
+
+ f_bdir.resize( G );
+ for( Index p = 0 ; p < G ; ++p )
+  f_bdir[ p ] = z[ p ];
+ p_dir = & f_bdir;
+ }
+
+/*--------------------------------------------------------------------------*/
+
 void FrankWolfeSolver::bundle_direction( OFValue fx )
 {
+ if( f_direction == eDirBundleMP ) {
+  master_direction( fx );
+  f_pgrad = f_grad;
+  f_pxval = f_xval;
+  f_pval = fx;
+  return;
+  }
+
  if( f_direction != eDirBundle ) {
   p_dir = & f_grad;
   return;

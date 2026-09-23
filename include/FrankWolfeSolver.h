@@ -136,6 +136,8 @@
 
 #include <exception>
 
+#include "MasterProblemBlock.h"
+
 #include <tuple>
 
 #include <vector>
@@ -255,7 +257,8 @@ class FrankWolfeSolver : public CDASolver
  /// which direction the oracle is given (value of intFWDirection)
  enum direction_type {
   eDirGradient = 0 ,  ///< the gradient at the current iterate
-  eDirBundle   = 1    ///< the solution of a stabilized master problem
+  eDirBundle   = 1 ,  ///< the master of two pieces, solved in closed form
+  eDirBundleMP = 2    ///< the master of a bundle, a MasterProblemBlock
   };
 
 /*--------------------------------------------------------------------------*/
@@ -421,6 +424,15 @@ class FrankWolfeSolver : public CDASolver
    * paid for: no evaluation is added [see the file documentation for where
    * these formulae come from]. */
 
+  intFWBundleSize ,
+  ///< how many pieces the master problem of eDirBundleMP keeps
+  /**< The size of the bundle of pairs (gradient, linearization error) that
+   * the master problem of intFWDirection == eDirBundleMP is built on. With 2
+   * it is the master that eDirBundle solves in closed form, which is how the
+   * two are checked against each other; the larger it is, the more of the
+   * information the method has produced the direction is drawn from. Has no
+   * effect under the other directions. Default 10. */
+
   intLastParFWSlv  ///< first allowed parameter value for derived classes
   };
 
@@ -439,6 +451,20 @@ class FrankWolfeSolver : public CDASolver
    * eDirGradient. Default 1. */
 
   dblLastParFWSlv  ///< first allowed parameter value for derived classes
+  };
+
+/*--------------------------------------------------------------------------*/
+ /// public enum "extending" str_par_type_CDAS to FrankWolfeSolver
+
+ enum str_par_type_FWSlv {
+  strFWMPBCfg = strLastParCDAS ,
+  ///< the BlockSolverConfig of the Solver of the master of eDirBundleMP
+  /**< The name of the file describing the BlockSolverConfig of the Solver
+   * that solves the master problem of intFWDirection == eDirBundleMP, which
+   * is a quadratic program. Empty (the default) leaves the master to pick
+   * its own. Has no effect under the other directions. */
+
+  strLastParFWSlv  ///< first allowed parameter value for derived classes
   };
 
 /** @} ---------------------------------------------------------------------*/
@@ -515,6 +541,24 @@ class FrankWolfeSolver : public CDASolver
 /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
 
  [[nodiscard]] double get_dflt_dbl_par( idx_type par ) const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ void set_par( idx_type par , std::string && value ) override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] const std::string & get_str_par( idx_type par ) const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] idx_type str_par_str2idx( const std::string & name )
+  const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] const std::string & str_par_idx2str( idx_type idx )
+  const override;
 
 /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
 
@@ -702,6 +746,21 @@ class FrankWolfeSolver : public CDASolver
  void bundle_direction( OFValue fx );
 
 /*--------------------------------------------------------------------------*/
+ /// the same direction, taken from a MasterProblemBlock [see eDirBundleMP]
+ /** Keeps a bundle of the pairs (gradient, linearization error) the method
+  * has produced, in a MasterProblemBlock with one component and a proximal
+  * stabilization, and takes its aggregated subgradient as the direction.
+  * With a bundle of two it is the closed form of bundle_direction(), which
+  * is how the two are checked against each other. */
+
+ void master_direction( OFValue fx );
+
+/*--------------------------------------------------------------------------*/
+ /// builds the MasterProblemBlock of eDirBundleMP, once
+
+ void build_master( void );
+
+/*--------------------------------------------------------------------------*/
  /// evaluate the father Objective at the current point and fill f_grad
  void evaluate_gradient( void );
 
@@ -758,8 +817,18 @@ class FrankWolfeSolver : public CDASolver
  int f_max_atoms;      ///< intMaxAtoms
  int f_cvx_comb;       ///< intCvxComb (eObjAtX / eObjCvxComb)
  int f_handle_mod;     ///< intHandleMod (eModReset / eModFine)
- int f_direction;      ///< intFWDirection (eDirGradient / eDirBundle)
+ int f_direction;      ///< intFWDirection (eDirGradient / eDirBundle / MP)
  double f_t;           ///< dblFWt, the stabilization of that master problem
+ int f_bundle_size;    ///< intFWBundleSize, how many pieces the master keeps
+
+ MasterProblemBlock * f_mpb = nullptr;
+ ///< the master problem of eDirBundleMP, built once and kept
+
+ std::string f_mpb_cfg;
+ ///< strFWMPBCfg, the BlockSolverConfig of the Solver of that master
+
+ int f_next_slot = 0;
+ ///< which slot of the bundle the next piece takes when it is full
  int f_max_thread;     ///< intMaxThread
  int f_max_iter;       ///< intMaxIter
  double f_max_time;    ///< dblMaxTime
