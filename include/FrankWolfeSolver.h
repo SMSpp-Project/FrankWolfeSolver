@@ -26,6 +26,17 @@
  * stronger Dantzig-Wolfe / perspective-cut relaxation of it; see the GENERAL
  * NOTES of the class and the intCvxComb parameter.
  *
+ * The direction is the one the by-the-book method uses, i.e., the gradient of
+ * the linking function at the current iterate is what the LMO is given, which
+ * reduces the function to its first-order model and ignores every other piece
+ * of information about it. Formulae that instead pass the solution of a small
+ * stabilized master problem, built out of the first-order information already
+ * at hand and having the by-the-book choice as the special case in which one
+ * linearization alone is kept, are those of
+ *
+ *  A. Frangioni, F. Rinaldi "Bundle-inspired Direction Formulae for
+ *  Conditional Gradient Methods", draft
+ *
  * See FrankWolfeSolver/frank-wolfe-design.md for the full design.
  *
  * \author Antonio Frangioni \n
