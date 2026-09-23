@@ -1477,11 +1477,43 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
   if( ( gap <= rel_thr ) ||
       ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ) {
-   // eBeforeTermination: a handler may veto the optimality stop (eForceContinue)
-   int ev = run_event( eBeforeTermination );
-   if( ev != eForceContinue ) {
-    status = ( ev == eStopError ) ? kError : kOK;
-    break;
+
+   /* The gap is a certificate of optimality only if the vertex it is
+    * measured against minimizes the gradient over the feasible set, which
+    * is what the oracle answers when it is given the gradient. Under a
+    * direction built out of more than that, what the oracle returns is the
+    * best vertex for that direction, and the quantity above can be small
+    * while the iterate is far from optimal: before stopping, the oracle is
+    * therefore asked once more with the gradient, and its answer is taken
+    * as the vertex of this iteration, so that the call is not wasted if the
+    * gap does not hold up. */
+
+   if( p_dir != & f_grad ) {
+    p_dir = & f_grad;
+    scatter();
+    run_LMOs( true );
+    if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
+    mv_sum = 0;
+    for( auto & d : v_sb )
+     mv_sum += d.value;
+    capture_father_values( f_vval );
+    cv = mv_sum - grad_dot( f_vval );
+    gap = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+    f_last_gap = gap;
+
+    if( f_log && ( f_log_verb >= 2 ) )
+     *f_log << "  FW it " << t << ": gap " << gap << " with the gradient"
+            << std::endl;
+    }
+
+   if( ( gap <= rel_thr ) ||
+       ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ) {
+    // eBeforeTermination: a handler may veto the optimality stop
+    int ev = run_event( eBeforeTermination );
+    if( ev != eForceContinue ) {
+     status = ( ev == eStopError ) ? kError : kOK;
+     break;
+     }
     }
    }
 
