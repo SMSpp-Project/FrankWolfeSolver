@@ -1367,6 +1367,20 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    s += f_grad[ p ] * val[ p ];
   return( s ); };
 
+ /* The same with what the oracle has actually been given, which is the
+  * gradient unless a direction has been built out of more than it: the
+  * objectives the oracle minimizes carry that vector, so the values it
+  * reports are in those units, and taking them out is what leaves the cost
+  * of the sub-Block alone. With the gradient the two coincide and nothing
+  * changes [see bundle_direction()]. */
+
+ auto dir_dot = [ this , G ]( const std::vector< FunctionValue > & val ) {
+  const auto & dir = p_dir ? *p_dir : f_grad;
+  OFValue s = 0;
+  for( Index p = 0 ; p < G ; ++p )
+   s += dir[ p ] * val[ p ];
+  return( s ); };
+
  // initialization. Warm start: if a previous compute() left a (still feasible)
  // iterate -- which process_modifications keeps across an objective-only change
  // and drops on a structural/feasibility change -- reuse it as x0; the loop
@@ -1437,7 +1451,13 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   capture_father_values( f_vval );
 
   OFValue gx = grad_dot( f_xval );               // <grad f_father(x), x>
-  OFValue cv = mv_sum - grad_dot( f_vval );      // sum_j h_j(v_j)
+  OFValue cv = mv_sum - dir_dot( f_vval );       // sum_j h_j(v_j)
+
+  // what the value, the gap and the line search need is the vertex priced
+  // with the gradient, whatever the oracle has been given to find it
+  mv_sum = cv + grad_dot( f_vval );
+  if( ! cvx )
+   mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
 
   // cost_x = <grad f_father, x> + ( sub-Block cost at x ): in (P2) the latter
   // is the tracked convex combination cbar; in (P1) it is re-evaluated, i.e.
