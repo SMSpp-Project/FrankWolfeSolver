@@ -94,6 +94,7 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_cvx_comb    = get_dflt_int_par( intCvxComb );
  f_handle_mod  = get_dflt_int_par( intHandleMod );
  f_direction   = get_dflt_int_par( intFWDirection );
+ f_sigma       = 0;
  f_t           = get_dflt_dbl_par( dblFWt );
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
@@ -863,12 +864,14 @@ void FrankWolfeSolver::master_direction( OFValue fx )
 
  if( f_mpb->solve_master() < Solver::kOK ) {
   p_dir = & f_grad;                     // the master says nothing: the
-  return;                               // gradient is always a fallback
+  f_sigma = 0;                          // gradient is always a fallback
+  return;
   }
 
  const auto z = f_mpb->get_aggregated_subgradient( 0 );
  if( z.size() < G ) {
   p_dir = & f_grad;
+  f_sigma = 0;
   return;
   }
 
@@ -876,12 +879,23 @@ void FrankWolfeSolver::master_direction( OFValue fx )
  for( Index p = 0 ; p < G ; ++p )
   f_bdir[ p ] = z[ p ];
  p_dir = & f_bdir;
+
+ // the aggregate linearization error of the direction at the current
+ // iterate, i.e. the sigma* that makes z* a sigma*-subgradient there: it is
+ // what the bound has to be weakened by [see compute_vanilla()]
+ f_sigma = f_mpb->get_aggregated_alpha( 0 );
+ if( f_sigma < 0 )
+  f_sigma = 0;
  }
 
 /*--------------------------------------------------------------------------*/
 
 void FrankWolfeSolver::bundle_direction( OFValue fx )
 {
+ // the direction is the gradient unless one is built below, and the gradient
+ // is a subgradient with no error at all
+ f_sigma = 0;
+
  if( f_direction == eDirBundleMP ) {
   master_direction( fx );
   f_pgrad = f_grad;
@@ -938,6 +952,11 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
    for( Index p = 0 ; p < G ; ++p )
     f_bdir[ p ] = f_grad[ p ] + theta * ( f_pgrad[ p ] - f_grad[ p ] );
    p_dir = & f_bdir;
+
+   // the direction is the combination of a linearization with error 0, the
+   // gradient here, and one with error alpha, so it is a sigma*-subgradient
+   // with sigma* = theta alpha [see compute_vanilla()]
+   f_sigma = theta * alpha;
    }
   else
    p_dir = & f_grad;
@@ -1610,8 +1629,15 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   OFValue gx = grad_dot( f_xval );               // <grad f_father(x), x>
   OFValue cv = mv_sum - dir_dot( f_vval );       // sum_j h_j(v_j)
 
-  // what the value, the gap and the line search need is the vertex priced
-  // with the gradient, whatever the oracle has been given to find it
+  // the two quantities as the oracle has them, i.e. priced with the
+  // direction it was given: these are what the bound is built out of [see
+  // below], while the value and the line search want the gradient
+  const OFValue dx = dir_dot( f_xval );
+  const OFValue mv_dir = mv_sum;                 // min over X of <z*,.> + h
+  const OFValue mx_dir = mx_sum;                 // <z*,x> + h(x)
+
+  // what the value and the line search need is the vertex priced with the
+  // gradient, whatever the oracle has been given to find it
   mv_sum = cv + grad_dot( f_vval );
   if( ! cvx )
    mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
@@ -1623,7 +1649,20 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   OFValue cost_x = cvx ? ( gx + cbar ) : mx_sum;
 
   f_value = father_val + ( cost_x - gx );
-  OFValue gap = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+
+  /* The bound, whatever direction the oracle has been given. z* is a
+   * sigma*-subgradient of the linking function at the current iterate, i.e.
+   *
+   *   f( y ) >= f( x ) + < z* , y - x > - sigma*   for every y ,
+   *
+   * so minimizing < z* , . > over the feasible set bounds the optimum from
+   * below once < z* , x > and sigma* are put in, and the quantity below is
+   * a valid gap. With the gradient it is the classical one, z* being the
+   * gradient and sigma* zero [see bundle_direction()]. */
+
+  OFValue cost_x_dir = cvx ? ( dx + cbar ) : mx_dir;
+  OFValue gap = f_max ? ( mv_dir - cost_x_dir + f_sigma )
+                      : ( cost_x_dir - mv_dir + f_sigma );
   f_bound = f_max ? ( f_value + gap ) : ( f_value - gap );
   f_niter = t; f_last_gap = gap;             // for the final-summary log
 
@@ -1635,33 +1674,6 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   if( ( gap <= rel_thr ) ||
       ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ) {
 
-   /* The gap is a certificate of optimality only if the vertex it is
-    * measured against minimizes the gradient over the feasible set, which
-    * is what the oracle answers when it is given the gradient. Under a
-    * direction built out of more than that, what the oracle returns is the
-    * best vertex for that direction, and the quantity above can be small
-    * while the iterate is far from optimal: before stopping, the oracle is
-    * therefore asked once more with the gradient, and its answer is taken
-    * as the vertex of this iteration, so that the call is not wasted if the
-    * gap does not hold up. */
-
-   if( p_dir != & f_grad ) {
-    p_dir = & f_grad;
-    scatter();
-    run_LMOs( true );
-    if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
-    mv_sum = 0;
-    for( auto & d : v_sb )
-     mv_sum += d.value;
-    capture_father_values( f_vval );
-    cv = mv_sum - grad_dot( f_vval );
-    gap = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
-    f_last_gap = gap;
-
-    if( f_log && ( f_log_verb >= 2 ) )
-     *f_log << "  FW it " << t << ": gap " << gap << " with the gradient"
-            << std::endl;
-    }
 
    if( ( gap <= rel_thr ) ||
        ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ) {
@@ -1850,8 +1862,16 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   // mx_sum: in (P2) the sub-Block cost at x is the convex combination cbar of
   // the atom costs ( cost_x = gx + cbar ); in (P1) it is mx_sum ( = gx + cost
   // re-evaluated at x ). The two coincide for linear sub-Block objectives.
-  // whatever the oracle has been given to find the vertex, what the value,
-  // the gap and the line search need is the vertex priced with the gradient
+  // the two quantities as the oracle has them, i.e. priced with the
+  // direction it was given: these are what the bound is built out of [see
+  // the same in the vanilla loop], while the value, the away atom and the
+  // line search want the gradient
+  const OFValue dx = dir_dot( f_xval );
+  const OFValue mv_dir = mv_sum;                 // min over X of <z*,.> + h
+  const OFValue mx_dir = mx_sum;                 // <z*,x> + h(x)
+
+  // whatever the oracle has been given to find the vertex, what the value
+  // and the line search need is the vertex priced with the gradient
   mv_sum += grad_dot( f_vval ) - dir_dot( f_vval );
   if( ! cvx )
    mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
@@ -1864,7 +1884,13 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   OFValue cost_x = cvx ? ( gx + cbar ) : mx_sum;
 
   f_value = father_val + ( cost_x - gx );
-  OFValue fw_gap   = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+
+  // the bound out of z* and sigma*, whatever the direction [see the vanilla
+  // loop for why this is valid]; the away gap stays on the gradient, the
+  // atom to take weight away from being chosen with it
+  OFValue cost_x_dir = cvx ? ( dx + cbar ) : mx_dir;
+  OFValue fw_gap   = f_max ? ( mv_dir - cost_x_dir + f_sigma )
+                           : ( cost_x_dir - mv_dir + f_sigma );
   OFValue away_gap = f_max ? ( cost_x - La_a )   : ( La_a - cost_x );
   f_bound = f_max ? ( f_value + fw_gap ) : ( f_value - fw_gap );
   f_niter = t; f_last_gap = fw_gap;          // for the final-summary log
@@ -1875,26 +1901,6 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
 
-  /* The gap is a certificate only if the vertex it is measured against
-   * minimizes the gradient over the feasible set: under a direction built
-   * out of more than that, the oracle is asked once more with the gradient
-   * before stopping, and its answer is taken as the vertex of this
-   * iteration [see the same in the vanilla loop]. */
-
-  if( ( p_dir != & f_grad ) &&
-      ( ( fw_gap <= rel_thr ) ||
-        ( std::isfinite( f_abs_acc ) && ( fw_gap <= f_abs_acc ) ) ) ) {
-   p_dir = & f_grad;
-   scatter();
-   run_LMOs( true );
-   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
-   mv_sum = 0;
-   for( auto & d : v_sb )
-    mv_sum += d.value;
-   capture_father_values( f_vval );
-   fw_gap = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
-   f_last_gap = fw_gap;
-   }
 
   if( ( fw_gap <= rel_thr ) ||
       ( std::isfinite( f_abs_acc ) && ( fw_gap <= f_abs_acc ) ) ) {

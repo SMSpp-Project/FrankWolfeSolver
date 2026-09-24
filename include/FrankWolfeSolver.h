@@ -819,6 +819,13 @@ class FrankWolfeSolver : public CDASolver
  int f_cvx_comb;       ///< intCvxComb (eObjAtX / eObjCvxComb)
  int f_handle_mod;     ///< intHandleMod (eModReset / eModFine)
  int f_direction;      ///< intFWDirection (eDirGradient / eDirBundle / MP)
+
+ OFValue f_sigma;      ///< the linearization error of the direction
+                       /**< The sigma* that makes the direction a
+                        * sigma*-subgradient of the linking function at the
+                        * current iterate: 0 for the gradient, and what the
+                        * bound has to be weakened by otherwise [see
+                        * compute_vanilla()]. */
  double f_t;           ///< dblFWt, the stabilization of that master problem
  int f_bundle_size;    ///< intFWBundleSize, how many pieces the master keeps
 
