@@ -14,11 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - the checks on what the Block holds ask it for its groups of Variable and of
   Constraint, the vectors of `boost::any` they used to ask for not being
   there any more
+
 - whoever links the module keeps it: the classes of a module register
   themselves in the factory from a static initialiser, and a linker that
   drops what looks unused takes the registration away with it, so the target
   now tells whoever links it to keep the symbol that forces the module in,
   and on ELF, where naming the symbol is not enough, the library as a whole
+
 - a Variable of the father Objective that the Objective of its sub-Block does
   not price is no longer refused: what says which sub-Block it belongs to is
   the Block it is of, and the Objective of that sub-Block is where it is
