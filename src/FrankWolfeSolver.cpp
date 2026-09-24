@@ -1740,6 +1740,17 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
    s += f_grad[ p ] * val[ p ];
   return( s ); };
 
+ // the same with what the oracle has actually been given, which is the
+ // gradient unless a direction has been built out of more than it: the
+ // vertex it reports is priced in those units, and taking them out leaves
+ // the cost of the sub-Block alone [see bundle_direction()]
+ auto dir_dot = [ this , G ]( const std::vector< FunctionValue > & val ) {
+  const auto & dir = p_dir ? *p_dir : f_grad;
+  OFValue s = 0;
+  for( Index p = 0 ; p < G ; ++p )
+   s += dir[ p ] * val[ p ];
+  return( s ); };
+
  // initialization: a first LMO gives x0 = v0; active set = { ( v0 , 1 ) }.
  // Warm start: if a previous compute() left a valid active set (which
  // process_modifications keeps across an objective-only Modification, fixing
@@ -1792,9 +1803,10 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   f_x->write( f_Block );
   evaluate_gradient();
   OFValue father_val = f_fun->get_value();
+  capture_father_values( f_xval );
+  bundle_direction( father_val );
   scatter();
   OFValue mx_sum = eval_modified_objective();    // <grad F, x>
-  capture_father_values( f_xval );
 
   // away vertex: the active-set atom a maximizing (minimizing, if eMax) the
   // (modified) objective <grad F, a>, the "worst" atom we want to move weight
@@ -1838,6 +1850,12 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   // mx_sum: in (P2) the sub-Block cost at x is the convex combination cbar of
   // the atom costs ( cost_x = gx + cbar ); in (P1) it is mx_sum ( = gx + cost
   // re-evaluated at x ). The two coincide for linear sub-Block objectives.
+  // whatever the oracle has been given to find the vertex, what the value,
+  // the gap and the line search need is the vertex priced with the gradient
+  mv_sum += grad_dot( f_vval ) - dir_dot( f_vval );
+  if( ! cvx )
+   mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
+
   OFValue gx = grad_dot( f_xval );               // <grad f_father(x), x>
   OFValue cbar = 0;
   if( cvx )
@@ -1856,6 +1874,28 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
           << ", |A| " << f_aset.size() << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
+
+  /* The gap is a certificate only if the vertex it is measured against
+   * minimizes the gradient over the feasible set: under a direction built
+   * out of more than that, the oracle is asked once more with the gradient
+   * before stopping, and its answer is taken as the vertex of this
+   * iteration [see the same in the vanilla loop]. */
+
+  if( ( p_dir != & f_grad ) &&
+      ( ( fw_gap <= rel_thr ) ||
+        ( std::isfinite( f_abs_acc ) && ( fw_gap <= f_abs_acc ) ) ) ) {
+   p_dir = & f_grad;
+   scatter();
+   run_LMOs( true );
+   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
+   mv_sum = 0;
+   for( auto & d : v_sb )
+    mv_sum += d.value;
+   capture_father_values( f_vval );
+   fw_gap = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+   f_last_gap = fw_gap;
+   }
+
   if( ( fw_gap <= rel_thr ) ||
       ( std::isfinite( f_abs_acc ) && ( fw_gap <= f_abs_acc ) ) ) {
    // eBeforeTermination: a handler may veto the optimality stop (eForceContinue)
