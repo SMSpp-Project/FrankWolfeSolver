@@ -448,7 +448,14 @@ class FrankWolfeSolver : public CDASolver
    * whatever their linearization errors; the smaller it is, the more those
    * errors matter, and with 0 the direction is the gradient at the current
    * iterate, i.e. the by-the-book method. It has no effect under
-   * eDirGradient. Default 1. */
+   * eDirGradient. Default 1.    *
+   * A NEGATIVE value asks for it to be taken from the problem instead: the
+   * coefficient of strong convexity of the father objective, which for a
+   * quadratic one is the smallest eigenvalue of its Hessian, bounded below
+   * by Gershgorin and exact when the objective is diagonal. That coefficient
+   * may well be 0, the objective being convex and not strongly so, and then
+   * there is no stabilization and the direction is the gradient.
+   */
 
   dblLastParFWSlv  ///< first allowed parameter value for derived classes
   };
@@ -785,6 +792,9 @@ class FrankWolfeSolver : public CDASolver
  int run_event( int type );
 
  /// sum over the sub-Block of their (modified) objective at the current point
+ /// how much the master problem is stabilized [see dblFWt]
+ OFValue stab_weight( void ) const;
+
  OFValue eval_modified_objective( void );
 
  /// read the father active-variable values at the current point into dst
@@ -819,6 +829,13 @@ class FrankWolfeSolver : public CDASolver
  int f_cvx_comb;       ///< intCvxComb (eObjAtX / eObjCvxComb)
  int f_handle_mod;     ///< intHandleMod (eModReset / eModFine)
  int f_direction;      ///< intFWDirection (eDirGradient / eDirBundle / MP)
+
+ OFValue f_t_auto;     ///< the strong convexity of the father
+                       /**< The smallest eigenvalue of the Hessian of the
+                        * father objective, bounded below by Gershgorin and
+                        * exact when the objective is diagonal; 0 when the
+                        * objective is convex and not strongly so. It is what
+                        * a negative dblFWt asks for [see stab_weight()]. */
 
  OFValue f_sigma;      ///< the linearization error of the direction
                        /**< The sigma* that makes the direction a

@@ -95,6 +95,7 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_handle_mod  = get_dflt_int_par( intHandleMod );
  f_direction   = get_dflt_int_par( intFWDirection );
  f_sigma       = 0;
+ f_t_auto      = 0;
  f_t           = get_dflt_dbl_par( dblFWt );
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
@@ -404,6 +405,27 @@ void FrankWolfeSolver::analyze_father( void )
                                      it.value() );
    }
   }
+
+ // the strong convexity of the father, which is what dblFWt is measured
+ // against: for a quadratic objective it is the smallest eigenvalue of the
+ // Hessian, and Gershgorin bounds that from below by the smallest row of the
+ // diagonal minus the sum of the absolute values of what is off it, which is
+ // exact when there is nothing off it, i.e. for a DQuadFunction. It may well
+ // be 0, the objective being convex and not strongly so, and then there is
+ // nothing to take: whoever asked for it is left with the gradient
+ f_t_auto = 0;
+ if( ! f_father_diag.empty() ) {
+  std::vector< OFValue > row( f_father_diag.size() , 0 );
+  for( const auto & [ r , c , q ] : f_father_offdiag ) {
+   row[ r ] += std::abs( q );
+   row[ c ] += std::abs( q );
+   }
+  f_t_auto = Inf< OFValue >();
+  for( Index p = 0 ; p < Index( f_father_diag.size() ) ; ++p )
+   f_t_auto = std::min( f_t_auto , OFValue( f_father_diag[ p ] ) - row[ p ] );
+  if( f_t_auto < 0 )
+   f_t_auto = 0;
+  }
  }
 
 /*--------------------------------------------------------------------------*/
@@ -596,9 +618,8 @@ void FrankWolfeSolver::set_par( idx_type par , double value )
   case( dblAbsAcc ):   f_abs_acc = value;  return;
   case( dblEveryTTm ): f_every_t = value; return;
   case( dblFWt ):
-   if( value < 0 )
-    throw( std::invalid_argument( "FrankWolfeSolver::set_par: dblFWt must be "
-                                  "non-negative" ) );
+   // a negative value is not a weight but the request to take one from the
+   // problem, i.e. from the strong convexity of the father [see dblFWt]
    f_t = value;
    return;
   default:             CDASolver::set_par( par , value );
@@ -860,7 +881,7 @@ void FrankWolfeSolver::master_direction( OFValue fx )
   }
  f_next_slot = ( f_next_slot + 1 ) % std::max( f_bundle_size , 2 );
 
- f_mpb->set_t( f_t );
+ f_mpb->set_t( stab_weight() );
 
  if( f_mpb->solve_master() < Solver::kOK ) {
   p_dir = & f_grad;                     // the master says nothing: the
@@ -921,7 +942,9 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
   * the gradient, i.e. the by-the-book method, which is what a t of 0, a
   * first iteration or two gradients that agree give. */
 
- if( ( ! f_pgrad.empty() ) && ( f_t > 0 ) ) {
+ const OFValue t = stab_weight();
+
+ if( ( ! f_pgrad.empty() ) && ( t > 0 ) ) {
   // the linearization error of the previous gradient at the current iterate,
   // which convexity makes non-negative: what is below 0 is numerical noise
   OFValue alpha = fx - f_pval;
@@ -939,7 +962,7 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
 
   OFValue theta = 0;
   if( dd > 0 ) {
-   theta = - ( f_t * gd + alpha ) / ( f_t * dd );
+   theta = - ( t * gd + alpha ) / ( t * dd );
    if( theta < 0 )
     theta = 0;
    else
@@ -1459,6 +1482,18 @@ int FrankWolfeSolver::run_event( int type )
    return( res );
   }
  return( eContinue );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+Solver::OFValue FrankWolfeSolver::stab_weight( void ) const
+{
+ // how much the master problem is stabilized. A dblFWt of its own is taken as
+ // it is; a negative one says to take it from the problem, i.e. from the
+ // strong convexity of the father, which for a quadratic objective is the
+ // smallest eigenvalue of its Hessian [see analyze_father()]. That may be 0,
+ // and then there is no stabilization and the direction is the gradient
+ return( f_t < 0 ? f_t_auto : f_t );
  }
 
 /*--------------------------------------------------------------------------*/
