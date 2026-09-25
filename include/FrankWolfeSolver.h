@@ -165,8 +165,9 @@ namespace SMSpp_di_unipi_it {
 /// a CDASolver implementing Frank-Wolfe type algorithms
 /** The FrankWolfeSolver class derives from CDASolver and implements the
  * Frank-Wolfe (conditional gradient) family of algorithms, ported from the
- * Julia package FrankWolfe.jl. v1 implements the "vanilla" Frank-Wolfe
- * algorithm; Away-step and Blended Pairwise come later.
+ * Julia package FrankWolfe.jl: the "vanilla" Frank-Wolfe algorithm and the
+ * two active-set variants, Away-step and Blended Pairwise [see intAlgorithm],
+ * all three taking the direction selected by intFWDirection.
  *
  * The solver minimizes the "composite" objective
  *
