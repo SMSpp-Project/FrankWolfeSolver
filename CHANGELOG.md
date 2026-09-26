@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- a tester of the module, `test/`, posed on Blocks of the core alone: a father
+  `AbstractBlock` with a separable quadratic `DQuadFunction` over three
+  sub-`Block` with box constraints and a `BoxSolver` each, whose optimum is
+  known in closed form, solved by every algorithm under both bookkeeping
+  modes and both directions, with the bounds checked on both sides of the
+  optimum, a coordinate whose box is a single point, a `ColVariable` that the
+  `Objective` of its sub-`Block` does not price (added there and taken out
+  again when the `Solver` leaves), and a change of the costs of a sub-`Block`
+  solved again. The pipeline of the module builds the module alone and runs
+  this tester, the suites that pose the decomposition on the `Block` of other
+  modules running where those modules are
+
 ### Changed
 
 - the checks on what the Block holds ask it for its groups of Variable and of
