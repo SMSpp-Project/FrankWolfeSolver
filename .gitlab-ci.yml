@@ -28,7 +28,11 @@ build:
     # the ones the enabled modules need, and a revision the pull walks
     # through may pin a submodule commit no longer on its remote
     - if [ -d smspp-project ]; then (cd smspp-project && git pull --no-recurse-submodules && git submodule update --recursive); else git clone --branch develop git@gitlab.com:smspp/smspp-project.git; fi
-    - cmake -S smspp-project -B smspp-project/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DBUILD_FrankWolfeSolver=ON -DBUILD_tests=ON
+    # the cache keeps the build directory, whose CMakeCache.txt remembers the
+    # modules an earlier pipeline turned on: dropping it leaves exactly the
+    # modules this line asks for, the objects being kept all the same
+    - rm -f smspp-project/build/CMakeCache.txt
+    - cmake -S smspp-project -B smspp-project/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DBUILD_FrankWolfeSolver=ON
     - cmake --build smspp-project/build --target install
   artifacts:
     paths:
