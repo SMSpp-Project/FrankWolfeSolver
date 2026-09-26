@@ -26,25 +26,25 @@ if (NOT BUILD_SHARED_LIBS)
     endif ()
 endif ()
 
-# ----- FrankWolfeSolver_test ----------------------------------------------- #
-add_executable(${modName}_test test.cpp)
-target_link_libraries(${modName}_test PRIVATE SMS++::FrankWolfeSolver)
+# ----- FrankWolfeSolver_unit_test ------------------------------------------ #
+add_executable(${modName}_unit_test test.cpp)
+target_link_libraries(${modName}_unit_test PRIVATE SMS++::FrankWolfeSolver)
 
 if (WIN32 AND BUILD_SHARED_LIBS AND NOT DEFINED ENV{CONDA_BUILD})
     # On Windows with shared libraries enabled copies all runtime DLL
     # dependencies next to the executable in the build directory
     # (POST_BUILD), using CMake's TARGET_RUNTIME_DLLS generator expression
-    add_custom_command(TARGET ${modName}_test POST_BUILD
+    add_custom_command(TARGET ${modName}_unit_test POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_RUNTIME_DLLS:${modName}_test>
-            $<TARGET_FILE_DIR:${modName}_test>
+            $<TARGET_RUNTIME_DLLS:${modName}_unit_test>
+            $<TARGET_FILE_DIR:${modName}_unit_test>
             COMMAND_EXPAND_LISTS
-            COMMENT "Copying runtime DLLs next to ${modName}_test.exe")
+            COMMENT "Copying runtime DLLs next to ${modName}_unit_test.exe")
 endif ()
 
 # The tester builds its instances in memory and needs no data.
-add_test(NAME ${modName}_test
-         COMMAND ${modName}_test
+add_test(NAME ${modName}_unit_test
+         COMMAND ${modName}_unit_test
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # ----- the label of this module's tests ------------------------------------ #

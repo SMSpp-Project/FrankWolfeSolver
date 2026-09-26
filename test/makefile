@@ -11,7 +11,7 @@
 ##############################################################################
 
 # module name
-NAME = FrankWolfeSolver_test
+NAME = FrankWolfeSolver_unit_test
 
 # basic directory
 DIR = .
