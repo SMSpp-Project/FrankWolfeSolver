@@ -26,6 +26,14 @@
  * there with a zero cost to have somewhere to scatter the gradient, and takes
  * out again when it is unregistered.
  *
+ * Another Solver registered to the father, which never computes, has to
+ * receive nothing from a compute() of many iterations, which rewrites the
+ * costs of all the sub-Block at each of them and sets them back at the end:
+ * also when the father has a default channel of its own, which it has to
+ * get back, and when the oracle of a sub-Block throws halfway, after which
+ * the costs have to be the original ones and a new compute() has to find
+ * the optimum.
+ *
  * The test needs nothing but the core, so that the CI of FrankWolfeSolver
  * builds this module alone.
  *
@@ -42,11 +50,14 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "AbstractBlock.h"
+#include "BoxSolver.h"
 #include "DQuadFunction.h"
+#include "FakeSolver.h"
 #include "FRealObjective.h"
 #include "FrankWolfeSolver.h"
 #include "LinearFunction.h"
@@ -94,7 +105,21 @@ double optimum( void )
 /*--------------------------------------------------------------------------*/
 /// the father Block, its K sub-Block and the Solver of each of them
 
-AbstractBlock * build( std::vector< LinearFunction * > & costs )
+/// a BoxSolver whose compute() throws once it has been called limit times
+
+class ThrowingBoxSolver : public BoxSolver {
+ public:
+ int compute( bool changedvars = true ) override {
+  if( ++calls > limit )
+   throw( std::runtime_error( "ThrowingBoxSolver::compute: limit reached" ) );
+  return( BoxSolver::compute( changedvars ) );
+  }
+ int calls = 0;
+ int limit = 1 << 30;
+ };
+
+AbstractBlock * build( std::vector< LinearFunction * > & costs ,
+                       Solver * first = nullptr )
 {
  auto father = new AbstractBlock();
  DQuadFunction::v_coeff_triple triples;
@@ -125,7 +150,8 @@ AbstractBlock * build( std::vector< LinearFunction * > & costs )
   obj->set_sense( Objective::eMin , eNoMod );
   sb->set_objective( obj );
 
-  sb->register_Solver( Solver::new_Solver( "BoxSolver" ) );
+  sb->register_Solver( ( first && ( j == 0 ) ) ? first
+                                              : Solver::new_Solver( "BoxSolver" ) );
   father->add_nested_Block( sb );
   }
 
@@ -179,6 +205,128 @@ bool check( Solver * fw , const std::string & name )
            << " value " << value << " optimum " << opt
            << " lb " << lb << " status " << status
            << ( ok ? "  OK" : "  KO" ) << std::endl;
+ return( ok );
+ }
+
+/*--------------------------------------------------------------------------*/
+/// the linear coefficients of the sub-Block Objectives
+
+std::vector< double > coefficients( const std::vector< LinearFunction * > & c )
+{
+ std::vector< double > v;
+ for( auto lf : c )
+  for( Block::Index i = 0 ; i < lf->get_num_active_var() ; ++i )
+   v.push_back( lf->get_coefficient( i ) );
+ return( v );
+ }
+
+/*--------------------------------------------------------------------------*/
+/// what the other Solver of the father receives while FrankWolfeSolver runs
+
+bool check_other_solver( void )
+{
+ bool ok = true;
+ auto report = [ & ]( bool cond , const std::string & what ) {
+  std::cout << std::left << std::setw( 60 ) << what
+            << ( cond ? "  OK" : "  KO" ) << std::endl;
+  ok &= cond;
+  };
+
+ std::vector< LinearFunction * > costs;
+ auto thrower = new ThrowingBoxSolver();
+ auto father = build( costs , thrower );
+ auto fw = Solver::new_Solver( "FrankWolfeSolver" );
+ father->register_Solver( fw );
+ auto other = new FakeSolver();
+ father->register_Solver( other );
+ auto & mods = other->get_Modification_list();
+
+ // vanilla with the gradient converges slowly, i.e., many iterations
+ set_par( fw , "intLMOObj" , 2 );
+ set_par( fw , "intAlgorithm" , 0 );
+ set_par( fw , "intCvxComb" , 1 );
+ set_par( fw , "intFWDirection" , 0 );
+ set_par( fw , "intMaxIter" , 200000 );
+ set_par( fw , "dblRelAcc" , 1e-10 );
+
+ // the Variable FrankWolfeSolver adds to a sub-Block Objective when it is
+ // registered are a real change, which the other Solver has already seen
+ mods.clear();
+ const auto c_before = coefficients( costs );
+
+ ok &= check( fw , "with another Solver on the father" );
+ const int iters = thrower->calls;
+ report( iters > 100 , "  it took " + std::to_string( iters ) +
+         " iterations" );
+ report( mods.empty() , "  the other Solver has queued " +
+         std::to_string( mods.size() ) + " Modification" );
+ report( coefficients( costs ) == c_before , "  the costs are the original" );
+ report( father->get_default_channel() == 0 ,
+         "  the father has its default channel back" );
+
+ // a default channel of the father set by someone else is given back, and
+ // nothing is sent to it
+ const auto ch = father->open_channel();
+ father->set_default_channel( ch );
+ mods.clear();
+ ok &= check( fw , "with a default channel of the father" );
+ report( father->get_default_channel() == ch ,
+         "  the father has its default channel back" );
+ father->close_channel( ch );
+ bool empty = mods.size() <= 1;
+ if( ! mods.empty() ) {
+  auto gm = std::dynamic_pointer_cast< GroupModification >( mods.front() );
+  empty &= gm && gm->sub_Modifications().empty();
+  }
+ report( empty , "  nothing was sent to it" );
+
+ // a real change of the costs reaches the other Solver, and FrankWolfeSolver
+ for( int i = 0 ; i < N ; ++i ) {
+  data[ i ].c = - data[ i ].c;
+  costs[ 0 ]->modify_coefficient( i , data[ i ].c );
+  }
+ report( ! mods.empty() , "  a change of the costs reaches the other Solver" );
+
+ // the oracle of sub-Block 0 throws halfway: the exception comes out, the
+ // costs are the original ones, nothing reached the other Solver, and the
+ // next compute() finds the optimum
+ mods.clear();
+ const auto c_throw = coefficients( costs );
+ thrower->calls = 0;
+ thrower->limit = 5;
+ bool threw = false;
+ try {
+  fw->compute( false );
+  }
+ catch( std::runtime_error & ) {
+  threw = true;
+  }
+ report( threw , "  the exception of the oracle comes out of compute()" );
+ report( mods.empty() , "  after it the other Solver has queued " +
+         std::to_string( mods.size() ) + " Modification" );
+ report( coefficients( costs ) == c_throw , "  after it the costs are the "
+         "original" );
+ report( father->get_default_channel() == 0 ,
+         "  after it the father has its default channel back" );
+ thrower->limit = 1 << 30;
+ ok &= check( fw , "after the exception" );
+ report( mods.empty() , "  the other Solver has queued " +
+         std::to_string( mods.size() ) + " Modification" );
+
+ // undo the change of the costs for the cases that may follow
+ for( int i = 0 ; i < N ; ++i )
+  data[ i ].c = - data[ i ].c;
+
+ father->unregister_Solver( other );
+ delete other;
+ father->unregister_Solver( fw );
+ delete fw;
+ for( auto sb : father->get_nested_Blocks() ) {
+  auto s = sb->get_registered_solvers().front();
+  sb->unregister_Solver( s );
+  delete s;
+  }
+ delete father;
  return( ok );
  }
 
@@ -254,6 +402,8 @@ int main( void )
    }
   delete father;
   }
+
+ all &= check_other_solver();
 
  std::cout << ( all ? "All tests passed!!" : "Some test FAILED!!" )
            << std::endl;

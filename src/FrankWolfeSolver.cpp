@@ -193,10 +193,11 @@ void FrankWolfeSolver::restore_objectives( bool quiet )
  // teardown, and re-snapshotted by set_Block on a later re-attach.
  //
  // quiet == false issues the change normally: used at the end of compute(),
- // when all the :Solver are alive, so the bridge (and the other :Solver) are
- // correctly notified. FrankWolfeSolver itself ignores the resulting
- // Modification because it is inhibited around this call (a self-inflicted
- // change), see compute().
+ // when all the :Solver are alive, so the bridge and the LMO are correctly
+ // notified, while the other :Solver of the father see it only if the
+ // channel of compute() is shipped [see close_father_channel()].
+ // FrankWolfeSolver itself ignores the resulting Modification because it is
+ // inhibited around this call (a self-inflicted change), see compute().
  const ModParam par = quiet ? eNoMod : eModBlck;
  const bool alpha = ( f_lmo_obj == LMOFull );
 
@@ -235,6 +236,72 @@ void FrankWolfeSolver::restore_objectives( bool quiet )
   }
 
  f_modified = false;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::open_father_channel( void )
+{
+ f_c_open.resize( v_sb.size() );
+ for( Index j = 0 ; j < v_sb.size() ; ++j ) {
+  const auto & d = v_sb[ j ];
+  const Index n = d.fun->get_num_active_var();
+  auto & c = f_c_open[ j ];
+  c.resize( n );
+  for( Index i = 0 ; i < n ; ++i )
+   c[ i ] = d.dq ? d.dq->get_linear_coefficient( i )
+                 : d.lin->get_coefficient( i );
+  }
+
+ f_old_chnl = f_Block->get_default_channel();
+ f_chnl = f_Block->open_channel();
+ f_Block->set_default_channel( f_chnl );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::close_father_channel( void )
+{
+ if( ! f_chnl )
+  return;
+
+ const auto chnl = f_chnl;
+ f_chnl = 0;
+
+ // the change is none if every linear coefficient is back to its value when
+ // the channel was opened (which restore_objectives() gives, unless it has
+ // been prevented from completing)
+ bool same = ( f_c_open.size() == v_sb.size() );
+ for( Index j = 0 ; same && ( j < v_sb.size() ) ; ++j ) {
+  const auto & d = v_sb[ j ];
+  const auto & c = f_c_open[ j ];
+  const Index n = d.fun->get_num_active_var();
+  if( n != Index( c.size() ) ) {
+   same = false;
+   break;
+   }
+  for( Index i = 0 ; i < n ; ++i )
+   if( ( d.dq ? d.dq->get_linear_coefficient( i )
+              : d.lin->get_coefficient( i ) ) != c[ i ] ) {
+    same = false;
+    break;
+    }
+  }
+
+ f_c_open.clear();
+
+ // the previous default channel first, so that what is shipped goes where
+ // the Modification of the father went before; it may be no longer open if
+ // it has been closed meanwhile, and then it is 0
+ try {
+  f_Block->set_default_channel( f_old_chnl );
+  }
+ catch( std::invalid_argument & ) {
+  f_Block->set_default_channel( 0 );
+  }
+ f_old_chnl = 0;
+
+ f_Block->close_channel( chnl , false , same );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -1004,6 +1071,16 @@ void FrankWolfeSolver::scatter( void )
 
  const bool alpha = ( f_lmo_obj == LMOFull );
 
+ // the Modification of the previous scatter() are superseded by those
+ // below, which touch the same coefficients: the channel of the father
+ // keeps only the last ones [see compute()]
+ if( f_chnl )
+  f_Block->clear_channel( f_chnl );
+
+ // set before the first change, so that restore_objectives() also undoes a
+ // scatter() interrupted by an exception
+ f_modified = true;
+
  // what the oracle is given is the gradient unless a direction has been
  // built out of more than it [see bundle_direction()]
  const auto & dir = p_dir ? *p_dir : f_grad;
@@ -1053,8 +1130,6 @@ void FrankWolfeSolver::scatter( void )
   else
    d.lin->modify_coefficients( std::move( nc ) , Function::Range( 0 , n ) );
   }
-
- f_modified = true;
  }
 
 /*--------------------------------------------------------------------------*/
@@ -1101,15 +1176,19 @@ void FrankWolfeSolver::run_LMOs( bool changedvars )
   chunk();                                // the main thread participates
   for( auto & th : pool )
    th.join();
-
-  // re-throw (in the main thread) the first exception, if any
-  for( auto & d : v_sb )
-   if( d.excp ) {
-    auto e = d.excp;
-    d.excp = nullptr;
-    std::rethrow_exception( e );
-    }
   }
+
+ // re-throw (in the main thread) the first exception, if any, on either
+ // path, forgetting the others so that the next call does not see them
+ std::exception_ptr first;
+ for( auto & d : v_sb )
+  if( d.excp ) {
+   if( ! first )
+    first = d.excp;
+   d.excp = nullptr;
+   }
+ if( first )
+  std::rethrow_exception( first );
 
  // a sub-Block whose (relaxed) feasible region is empty makes the product
  // region -- hence the father -- infeasible
@@ -1429,14 +1508,37 @@ int FrankWolfeSolver::compute( bool changedvars )
  // drops new incoming ones)
  inhibit_Modification( true );
 
+ // every iteration rewrites the linear costs of all the sub-Block
+ // Objectives, and restore_objectives() sets them back at the end. The
+ // Modification are needed by the sub-Block themselves (which may translate
+ // them into their physical data) and by their Solver, the LMO first, but
+ // not by the other Solver of the father and of its ancestors: the net
+ // change for them is none, and a Solver that does not compute meanwhile
+ // would only pile them up. Hence the father gets a channel of its own as
+ // default one while the method runs: the Modification of the sub-Block
+ // reach the sub-Block and its Solver as before, and stop in the channel,
+ // which scatter() empties each time and which is discarded at the end if
+ // the costs are those at the beginning, or else shipped with the last
+ // Modification, which bring the others to the state of the Block. The
+ // guard closes it on every way out of the method, exceptions comprised.
+ struct ChannelGuard {
+  FrankWolfeSolver * fw;
+  ~ChannelGuard() {
+   try { fw->close_father_channel(); }
+   catch( ... ) {}
+   }
+  } guard{ this };
+
  int status;
  try {
+  open_father_channel();
   status = ( f_algorithm == AlgVanilla ) ? compute_vanilla( changedvars )
                                          : compute_active_set( changedvars );
   }
  catch( ... ) {
   if( f_modified )
    restore_objectives( false );
+  close_father_channel();
   inhibit_Modification( false );
   if( ! owned )
    f_Block->unlock( f_id );
@@ -1446,9 +1548,10 @@ int FrankWolfeSolver::compute( bool changedvars )
 
  // leave the Block pristine between two solves: undo the last scatter so any
  // external change to the sub-Block objectives is "clean" (issued normally, so
- // the bridge / the other :Solver are notified; ignored by us, being inhibited)
+ // the bridge and the LMO are notified; ignored by us, being inhibited)
  if( f_modified )
   restore_objectives( false );
+ close_father_channel();
  inhibit_Modification( false );
 
  if( ! owned )

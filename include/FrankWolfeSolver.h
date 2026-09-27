@@ -730,6 +730,27 @@ class FrankWolfeSolver : public CDASolver
  /// issues no Modification (for teardown), else the change is propagated
  void restore_objectives( bool quiet );
 
+ /// open the channel of the father that holds the Modification of compute()
+ /** Opens a channel in the father Block and makes it the default channel of
+  * the father, recording the one it replaces and the linear coefficients of
+  * every sub-Block Objective. The Modification of the sub-Block still reach
+  * the Solver of the sub-Block (the LMO), which sees them before the father
+  * packs them, but no longer reach the other Solver of the father and of its
+  * ancestors. See compute(). */
+
+ void open_father_channel( void );
+
+ /// close the channel of open_father_channel(), if open
+ /** Gives the father back its previous default channel, then closes the
+  * channel: if the linear coefficients of every sub-Block Objective are
+  * those recorded when it was opened the change is none, and the channel is
+  * discarded; otherwise its content, i.e., the Modification of the last
+  * scatter() and of restore_objectives(), is shipped on that default
+  * channel, which brings whoever did not see the others to the state of the
+  * Block. */
+
+ void close_father_channel( void );
+
  /// process the Modification queued from the sub-Block (lazily, at compute());
  /// categorizes them and rebuilds the affected cached information
  void process_modifications( void );
@@ -912,6 +933,10 @@ class FrankWolfeSolver : public CDASolver
  OFValue f_bound = 0;          ///< F(x) - gap, best bound found
  bool f_has_sol = false;       ///< whether a (primal) solution is available
  bool f_modified = false;      ///< whether the sub-Block objectives were modified
+ Observer::ChnlName f_chnl = 0;      ///< the channel of the father in compute()
+ Observer::ChnlName f_old_chnl = 0;  ///< the default channel it replaced
+ /// linear coefficients of each sub-Block Objective when f_chnl was opened
+ std::vector< std::vector< Function::FunctionValue > > f_c_open;
  bool f_lmo_infeas = false;    ///< whether the last run_LMOs found an infeasible
                                ///< sub-Block (=> the father is infeasible)
 

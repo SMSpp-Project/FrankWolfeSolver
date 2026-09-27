@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- the tester registers to the father another Solver that never computes,
+  which has to receive nothing from a `compute()` of many iterations, also
+  when the father has a default channel of its own and when the oracle of a
+  sub-Block throws halfway, after which the costs have to be the original
+  ones and a new `compute()` has to find the optimum
+
 - a tester of the module, `test/`, posed on Blocks of the core alone: a father
   `AbstractBlock` with a separable quadratic `DQuadFunction` over three
   sub-`Block` with box constraints and a `BoxSolver` each, whose optimum is
@@ -43,6 +49,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decomposition cannot move
 
 ### Fixed
+
+- a Solver registered to the father next to `FrankWolfeSolver` (e.g., the
+  `MILPSolver` of a battery, which solves the Block once and never again)
+  received the Modification of every iteration, which rewrites the costs of
+  all the sub-Block, and piled them up without bound: 315 KB per iteration
+  on `goto10_8`, 25 GB in 4 minutes, which killed the runner of the MCFBlock
+  batteries. `compute()` now makes a channel of the father its default one
+  while it runs: the sub-Block and their Solver, the LMO first, receive the
+  Modification as before, while the channel is emptied at each iteration
+  and, at the end, discarded if the costs are back to those at the
+  beginning, as `restore_objectives()` leaves them, or else shipped with the
+  last Modification, which bring the other Solver to the state of the Block.
+  The father gets back the default channel it had, on every way out of the
+  method, exceptions comprised
+
+- an exception thrown by an LMO on the sequential path (`intMaxThread` <= 1
+  or one sub-Block) was caught and never re-thrown, so that the method went
+  on with the result of the previous call, and on the parallel path the
+  exceptions after the first were kept and re-thrown by the next call: the
+  first one is now re-thrown on both paths, and the others are forgotten
+
+- `scatter()` marks the sub-Block Objectives as changed before changing
+  them, so that `restore_objectives()` also undoes a `scatter()` interrupted
+  by an exception
 
 - on macOS a program linking the module lost the classes the module
   registers in the factories when the linker dropped the library, as it
