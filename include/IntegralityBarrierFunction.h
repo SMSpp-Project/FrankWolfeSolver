@@ -11,11 +11,15 @@
  * in the interior, while the integer ones, the penalty being zero there,
  * stay global minima even if they lie on the boundary.
  *
+ * \author Antonio Frangioni \n
+ *         Dipartimento di Informatica \n
+ *         Universita' di Pisa \n
+ *
  * \author Donato Meoli \n
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \copyright &copy; by Donato Meoli
+ * \copyright &copy; by Antonio Frangioni, Donato Meoli
  */
 /*--------------------------------------------------------------------------*/
 /*----------------------------- DEFINITIONS --------------------------------*/
@@ -180,8 +184,9 @@ class IntegralityBarrierFunction : public C05Function
   * the same groups [see the class], whose LinearFunction must have no
   * Variable but those. The bounds of the Variable, needed by the
   * normalisation of the slacks, are those of the ColVariable together with
-  * those of the OneVarConstraint in the static groups. The exponents y are all set to 1. The function issues
-  * no Modification: it is meant to be built before it is used. */
+  * those of the OneVarConstraint in the static groups. The exponents y are
+  * all set to 1. The function issues no Modification: it is meant to be
+  * built before it is used. */
 
  void build( Block * block );
 

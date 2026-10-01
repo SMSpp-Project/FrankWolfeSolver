@@ -4,11 +4,15 @@
 /** @file
  * Implementation of the IntegralityBarrierFunction class.
  *
+ * \author Antonio Frangioni \n
+ *         Dipartimento di Informatica \n
+ *         Universita' di Pisa \n
+ *
  * \author Donato Meoli \n
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \copyright &copy; by Donato Meoli
+ * \copyright &copy; by Antonio Frangioni, Donato Meoli
  */
 /*--------------------------------------------------------------------------*/
 /*------------------------------ INCLUDES ----------------------------------*/
@@ -234,8 +238,8 @@ Function::FunctionValue IntegralityBarrierFunction::dpsi( FunctionValue t )
  // psi = exp( - 1 / B ), B = cos( 2 pi ( t - 1/2 ) ) + 1 + eps, hence
  // psi' = psi * B' / B^2 with B' = - 2 pi sin( 2 pi ( t - 1/2 ) )
  const FunctionValue B = std::cos( 2 * M_PI * ( t - 0.5 ) ) + 1 + f_eps;
- return( std::exp( - 1 / B ) * ( - 2 * M_PI * std::sin( 2 * M_PI * ( t - 0.5 ) ) )
-	 / ( B * B ) );
+ const FunctionValue dB = - 2 * M_PI * std::sin( 2 * M_PI * ( t - 0.5 ) );
+ return( std::exp( - 1 / B ) * dB / ( B * B ) );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -251,9 +255,10 @@ Function::FunctionValue IntegralityBarrierFunction::slack( Index k ) const
 
 /*--------------------------------------------------------------------------*/
 
-void IntegralityBarrierFunction::barrier( std::vector< FunctionValue > & sigma ,
-					  std::vector< bool > & unclamped ,
-					  std::vector< FunctionValue > & P ) const
+void IntegralityBarrierFunction::barrier(
+				       std::vector< FunctionValue > & sigma ,
+				       std::vector< bool > & unclamped ,
+				       std::vector< FunctionValue > & P ) const
 {
  const Index m = v_rows.size();
  sigma.resize( m );
@@ -338,7 +343,8 @@ void IntegralityBarrierFunction::get_y_gradient(
   if( ! v_int[ i ] )
    continue;
   const FunctionValue D = P[ i ] + f_eps;
-  const FunctionValue w = - psi( v_vars[ i ]->get_value() ) * P[ i ] / ( D * D );
+  const FunctionValue w = - psi( v_vars[ i ]->get_value() ) * P[ i ] /
+			  ( D * D );
   for( auto k : v_rows_of[ i ] )
    gy[ k ] += w * std::log( sigma[ k ] );
   }

@@ -252,7 +252,7 @@ class FrankWolfeSolver : public CDASolver
  enum line_search_type {
   LSAuto     = 0 , ///< exact if the father objective is quadratic, else agnostic
   LSAgnostic = 1 , ///< the open-loop 2/(t+2) rule
-  LSExact    = 2 , ///< exact line search (requires a quadratic total objective)
+  LSExact    = 2 , ///< exact line search (needs a quadratic total objective)
   LSFixed    = 3   ///< the fixed step dblFWStep
   };
 

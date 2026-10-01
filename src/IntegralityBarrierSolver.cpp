@@ -4,11 +4,15 @@
 /** @file
  * Implementation of the IntegralityBarrierSolver class.
  *
+ * \author Antonio Frangioni \n
+ *         Dipartimento di Informatica \n
+ *         Universita' di Pisa \n
+ *
  * \author Donato Meoli \n
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \copyright &copy; by Donato Meoli
+ * \copyright &copy; by Antonio Frangioni, Donato Meoli
  */
 /*--------------------------------------------------------------------------*/
 /*------------------------------ INCLUDES ----------------------------------*/
@@ -264,7 +268,9 @@ void IntegralityBarrierSolver::update_y( void )
  std::vector< Function::FunctionValue > d( g.size() , 0 );
  for( Block::Index k = 0 ; k < g.size() ; ++k ) {
   const auto gk = nrm > 0 ? g[ k ] / nrm : 0;
-  if( ! ( ( ( y[ k ] <= 0 ) && ( gk < 0 ) ) || ( ( y[ k ] >= 1 ) && ( gk > 0 ) ) ) )
+  const bool out = ( ( y[ k ] <= 0 ) && ( gk < 0 ) ) ||
+		   ( ( y[ k ] >= 1 ) && ( gk > 0 ) );
+  if( ! out )
    d[ k ] = gk;
   }
  double step = 0;
@@ -359,7 +365,7 @@ int IntegralityBarrierSolver::compute( bool changedvars )
   // left in the Variable, or of the iterate, is feasible
   bool found = false;
   auto fw = static_cast< FrankWolfeSolver * >( f_fw );
-  auto id = f_fw->set_event_handler( eEverykIteration , [ this , fw , & found ]( void ) {
+  auto stop = [ this , fw , & found ]( void ) {
    if( rounding_feasible() ) {
     found = true;
     return( int( eStopOK ) );
@@ -370,7 +376,8 @@ int IntegralityBarrierSolver::compute( bool changedvars )
     return( int( eStopOK ) );
     }
    return( int( eContinue ) );
-   } );
+   };
+  auto id = f_fw->set_event_handler( eEverykIteration , stop );
 
   for( f_runs = 0 ; f_runs < f_max_iter ; ++f_runs ) {
    if( elapsed() >= f_max_time ) {
