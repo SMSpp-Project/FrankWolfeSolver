@@ -23,6 +23,7 @@
 /*--------------------------------------------------------------------------*/
 
 #include <cmath>
+#include <numbers>
 #include <unordered_map>
 
 #include "Block.h"
@@ -30,10 +31,6 @@
 #include "IntegralityBarrierFunction.h"
 #include "LinearFunction.h"
 #include "OneVarConstraint.h"
-
-#ifndef PI
- #define PI 3.14159265358979323846
-#endif
 
 /*--------------------------------------------------------------------------*/
 /*-------------------------------- USING -----------------------------------*/
@@ -245,7 +242,7 @@ void IntegralityBarrierFunction::everything_changed( ModParam issueMod )
 Function::FunctionValue IntegralityBarrierFunction::psi( FunctionValue t )
  const
 {
- FunctionValue B = std::cos( 2 * PI * ( t - 0.5 ) ) + 1 + f_eps;
+ FunctionValue B = std::cos( 2 * std::numbers::pi * ( t - 0.5 ) ) + 1 + f_eps;
  if( f_psi == ePsiSqrt )
   B = std::sqrt( B );
  return( std::exp( - 1 / B ) );
@@ -259,8 +256,9 @@ Function::FunctionValue IntegralityBarrierFunction::dpsi( FunctionValue t )
  // psi = exp( - 1 / B ), B = cos( 2 pi ( t - 1/2 ) ) + 1 + eps, hence
  // psi' = psi * B' / B^2 with B' = - 2 pi sin( 2 pi ( t - 1/2 ) ); with
  // ePsiSqrt B is the square root of that, and B' is divided by 2 B
- FunctionValue B = std::cos( 2 * PI * ( t - 0.5 ) ) + 1 + f_eps;
- FunctionValue dB = - 2 * PI * std::sin( 2 * PI * ( t - 0.5 ) );
+ FunctionValue B = std::cos( 2 * std::numbers::pi * ( t - 0.5 ) ) + 1 + f_eps;
+ FunctionValue dB = - 2 * std::numbers::pi *
+                    std::sin( 2 * std::numbers::pi * ( t - 0.5 ) );
  if( f_psi == ePsiSqrt ) {
   B = std::sqrt( B );
   dB /= 2 * B;
