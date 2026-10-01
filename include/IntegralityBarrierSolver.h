@@ -127,6 +127,11 @@ class IntegralityBarrierSolver : public Solver
 				  * the current values of the Variable, and -1
 				  * (the default) no starting point but the
 				  * vertex of the oracle [see the class]. */
+  intPsi ,                       ///< the form of the penalty
+                                 /**< The form of the integrality penalty of
+				  * the function, a value of
+				  * IntegralityBarrierFunction::psi_type.
+				  * Default ePsiPlain. */
   intLastAlgParIBSlv             ///< first new int parameter of derived
                                  ///< classes
   };
@@ -317,6 +322,7 @@ class IntegralityBarrierSolver : public Solver
 /*--------------------------- PROTECTED FIELDS -----------------------------*/
 
  int f_init_slvr = -1;          ///< intInitSlvr
+ int f_psi = 0;                 ///< intPsi
  int f_max_iter = 10;           ///< intMaxIter, the runs of Frank-Wolfe
  int f_log_verb = 0;            ///< intLogVerb
  double f_max_time = Inf< double >();  ///< dblMaxTime

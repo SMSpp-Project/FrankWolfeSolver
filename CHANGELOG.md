@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (mixed-)integer linear program: the sum over the integer variables of an
   integrality penalty divided by the product of the normalised slacks of
   the rows where each one appears, raised to exponents that weigh the rows,
-  with its gradient in the variables and in the exponents
+  with its gradient in the variables and in the exponents, and two forms of
+  the penalty, with or without a square root (`set_psi()`, `intPsi` of the
+  `IntegralityBarrierSolver`)
 
 - `IntegralityBarrierSolver`, a heuristic for a feasible solution of the
   integer program of its `Block`, which minimizes that function by a

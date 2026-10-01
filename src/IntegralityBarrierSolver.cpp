@@ -59,7 +59,7 @@ class FatherBlock : public AbstractBlock
   }
  };
 
-const std::array< std::string , 1 > int_names = { "intInitSlvr" };
+const std::array< std::string , 2 > int_names = { "intInitSlvr" , "intPsi" };
 const std::array< std::string , 3 > dbl_names = { "dblYLevel" , "dblX0Step" ,
 						   "dblBarrierEps" };
 const std::array< std::string , 3 > str_names = { "strFWCfg" ,
@@ -169,6 +169,7 @@ void IntegralityBarrierSolver::build( void )
  father->add_nested_Block( f_copy );
 
  f_fun = new IntegralityBarrierFunction( f_eps );
+ f_fun->set_psi( f_psi , eNoMod );
  f_fun->build( f_copy );
  f_fun->set_y( std::vector< Function::FunctionValue >(
 					     f_fun->get_rows().size() , 0 ) ,
@@ -473,6 +474,11 @@ void IntegralityBarrierSolver::set_par( idx_type par , int value )
 {
  switch( par ) {
   case( intInitSlvr ): f_init_slvr = value; return;
+  case( intPsi ):
+   f_psi = value;
+   if( f_fun )
+    f_fun->set_psi( value );
+   return;
   case( intMaxIter ):  f_max_iter = value;  return;
   case( intLogVerb ):  f_log_verb = value;  return;
   default:             Solver::set_par( par , value );
@@ -521,6 +527,7 @@ int IntegralityBarrierSolver::get_dflt_int_par( idx_type par ) const
 {
  switch( par ) {
   case( intInitSlvr ): return( -1 );
+  case( intPsi ):      return( 0 );
   case( intMaxIter ):  return( 10 );
   default:             return( Solver::get_dflt_int_par( par ) );
   }
@@ -557,6 +564,7 @@ int IntegralityBarrierSolver::get_int_par( idx_type par ) const
 {
  switch( par ) {
   case( intInitSlvr ): return( f_init_slvr );
+  case( intPsi ):      return( f_psi );
   case( intMaxIter ):  return( f_max_iter );
   case( intLogVerb ):  return( f_log_verb );
   default:             return( Solver::get_int_par( par ) );

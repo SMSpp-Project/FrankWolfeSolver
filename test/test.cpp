@@ -429,6 +429,8 @@ bool check_barrier_function( void )
   ok &= cond;
   };
 
+ bool threw = false;
+
  // 5 variables, the first 4 integer in [ 0 , 2 ], the last continuous in
  // [ 0 , 1 ]; rows with lhs only, rhs only, both (a range), an equality
  const int n = 5;
@@ -463,11 +465,15 @@ bool check_barrier_function( void )
  row( 3 , { 1 , -1 , 0 , 0 , 0 } , 0 , 0 );          // an equality
  b.add_static_constraint( *rows , "rows" );
 
+ for( int form : { int( IntegralityBarrierFunction::ePsiPlain ) ,
+		  int( IntegralityBarrierFunction::ePsiSqrt ) } ) {
+ const std::string name = form ? "psi with the square root: " : "";
  IntegralityBarrierFunction f( 1e-6 );
  f.build( & b );
+ f.set_psi( form );
  report( ( f.get_num_active_var() == Block::Index( n ) ) &&
 	 ( f.get_rows().size() == 4 ) ,
-	 "the barrier has 4 rows: lhs, rhs, the 2 of the range" );
+	 name + "the barrier has 4 rows" );
 
  // a point well inside the polyhedron (the equality aside), and y in
  // [ 0 , 1 ] with a 0
@@ -493,7 +499,7 @@ bool check_barrier_function( void )
   err = std::max( err , std::abs( fd - g[ i ] ) /
 		  std::max( 1.0 , std::abs( g[ i ] ) ) );
   }
- report( err < 1e-5 , "gradient in x against finite differences, error " +
+ report( err < 1e-5 , name + "gradient in x, error " +
 	 std::to_string( err ) );
 
  // the gradient in y
@@ -517,17 +523,17 @@ bool check_barrier_function( void )
 		   std::max( 1.0 , std::abs( gy[ k ] ) ) );
   }
  f.set_y( std::vector< double >( y0 ) );
- report( erry < 1e-5 , "gradient in y against finite differences, error " +
+ report( erry < 1e-5 , name + "gradient in y, error " +
 	 std::to_string( erry ) );
 
  // an integer point: the penalty vanishes, whatever the barrier
  for( int i = 0 ; i < n ; ++i )
   ( *x )[ i ].set_value( i < 4 ? 1 : 0.5 );
  f.compute();
- report( f.get_value() < 1e-12 , "the value at an integer point is " +
-	 std::to_string( f.get_value() ) );
+ report( f.get_value() < 1e-12 , name + "the value at an integer point is "
+	 + std::to_string( f.get_value() ) );
 
- bool threw = false;
+ threw = false;
  try { f.set_y( { 1 , 1 } ); }
  catch( std::invalid_argument & ) { threw = true; }
  report( threw , "set_y with the wrong number of exponents is refused" );
@@ -535,6 +541,11 @@ bool check_barrier_function( void )
  try { f.set_y( { 1 , -1 , 1 , 1 } ); }
  catch( std::invalid_argument & ) { threw = true; }
  report( threw , "a negative exponent is refused" );
+ threw = false;
+ try { f.set_psi( 2 ); }
+ catch( std::invalid_argument & ) { threw = true; }
+ report( threw , "an unknown form of psi is refused" );
+ }
 
  b.reset_static_constraints();
  b.reset_static_variables();

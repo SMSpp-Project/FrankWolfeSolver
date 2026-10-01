@@ -211,6 +211,17 @@ void IntegralityBarrierFunction::set_eps( FunctionValue eps ,
 
 /*--------------------------------------------------------------------------*/
 
+void IntegralityBarrierFunction::set_psi( int psi , ModParam issueMod )
+{
+ if( ( psi != ePsiPlain ) && ( psi != ePsiSqrt ) )
+  throw( std::invalid_argument( "IntegralityBarrierFunction::set_psi: "
+				"unknown form " + std::to_string( psi ) ) );
+ f_psi = psi;
+ everything_changed( issueMod );
+ }
+
+/*--------------------------------------------------------------------------*/
+
 void IntegralityBarrierFunction::everything_changed( ModParam issueMod )
 {
  if( ( ! f_Observer ) || ( ! f_Observer->issue_mod( issueMod ) ) )
@@ -226,7 +237,9 @@ void IntegralityBarrierFunction::everything_changed( ModParam issueMod )
 Function::FunctionValue IntegralityBarrierFunction::psi( FunctionValue t )
  const
 {
- const FunctionValue B = std::cos( 2 * M_PI * ( t - 0.5 ) ) + 1 + f_eps;
+ FunctionValue B = std::cos( 2 * M_PI * ( t - 0.5 ) ) + 1 + f_eps;
+ if( f_psi == ePsiSqrt )
+  B = std::sqrt( B );
  return( std::exp( - 1 / B ) );
  }
 
@@ -236,9 +249,14 @@ Function::FunctionValue IntegralityBarrierFunction::dpsi( FunctionValue t )
  const
 {
  // psi = exp( - 1 / B ), B = cos( 2 pi ( t - 1/2 ) ) + 1 + eps, hence
- // psi' = psi * B' / B^2 with B' = - 2 pi sin( 2 pi ( t - 1/2 ) )
- const FunctionValue B = std::cos( 2 * M_PI * ( t - 0.5 ) ) + 1 + f_eps;
- const FunctionValue dB = - 2 * M_PI * std::sin( 2 * M_PI * ( t - 0.5 ) );
+ // psi' = psi * B' / B^2 with B' = - 2 pi sin( 2 pi ( t - 1/2 ) ); with
+ // ePsiSqrt B is the square root of that, and B' is divided by 2 B
+ FunctionValue B = std::cos( 2 * M_PI * ( t - 0.5 ) ) + 1 + f_eps;
+ FunctionValue dB = - 2 * M_PI * std::sin( 2 * M_PI * ( t - 0.5 ) );
+ if( f_psi == ePsiSqrt ) {
+  B = std::sqrt( B );
+  dB /= 2 * B;
+  }
  return( std::exp( - 1 / B ) * dB / ( B * B ) );
  }
 

@@ -59,8 +59,14 @@ namespace SMSpp_di_unipi_it
  *  \f[ \psi( t ) = e^{ - 1 / ( \cos( 2 \pi ( t - 1/2 ) ) + 1 + \varepsilon ) }
  *  \f]
  *
+ * or, with ePsiSqrt [see set_psi()],
+ *
+ *  \f[ \psi( t ) = e^{ - 1 / \sqrt{ \cos( 2 \pi ( t - 1/2 ) ) + 1 +
+ *                                     \varepsilon } } \f]
+ *
  * is a smooth integrality penalty, periodic of period 1, smallest on the
- * integer values and largest on the half-integer ones. The rows are those of
+ * integer values and largest on the half-integer ones; the square root
+ * makes it go to 0 faster near the integer values. The rows are those of
  * the polyhedron written as \f$ a_k x \geq b_k \f$, each one with its slack
  * \f$ s_k = ( a_k x - b_k ) / n_k \f$, normalised by the largest value
  * \f$ n_k \f$ the slack can take over the bounds of the variables (1 if that
@@ -97,6 +103,12 @@ class IntegralityBarrierFunction : public C05Function
 /*--------------------------------------------------------------------------*/
 
  using v_col_var = std::vector< ColVariable * >;  ///< the active Variable
+
+ /// the forms of the integrality penalty psi [see the class]
+ enum psi_type {
+  ePsiPlain = 0 ,  ///< e^{ - 1 / ( cos + 1 + eps ) }
+  ePsiSqrt = 1     ///< e^{ - 1 / sqrt( cos + 1 + eps ) }
+  };
 
  /// a row a x >= b: the indices of its nonzeros, their values, and b
  struct Row {
@@ -203,6 +215,11 @@ class IntegralityBarrierFunction : public C05Function
  /// sets the epsilon of the formulae
 
  void set_eps( FunctionValue eps , ModParam issueMod = eModBlck );
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+ /// sets the form of the integrality penalty, a psi_type value
+
+ void set_psi( int psi , ModParam issueMod = eModBlck );
 
 /*--------------------------------------------------------------------------*/
 /*-------------------- Methods for handling Modification -------------------*/
@@ -360,6 +377,8 @@ class IntegralityBarrierFunction : public C05Function
 /*--------------------------------------------------------------------------*/
 
  FunctionValue f_eps;                  ///< the epsilon of the formulae
+
+ int f_psi = ePsiPlain;                ///< the form of psi
 
  v_col_var v_vars;                     ///< the active Variable
 
