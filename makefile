@@ -35,11 +35,15 @@
 
 # macros to be exported - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-FWSlvOBJ = $(FWSlvSDR)/obj/FrankWolfeSolver.o
+FWSlvOBJ = $(FWSlvSDR)/obj/FrankWolfeSolver.o \
+	$(FWSlvSDR)/obj/IntegralityBarrierFunction.o \
+	$(FWSlvSDR)/obj/IntegralityBarrierSolver.o
 
 FWSlvINC = -I$(FWSlvSDR)/include
 
-FWSlvH   = $(FWSlvSDR)/include/FrankWolfeSolver.h
+FWSlvH   = $(FWSlvSDR)/include/FrankWolfeSolver.h \
+	$(FWSlvSDR)/include/IntegralityBarrierFunction.h \
+	$(FWSlvSDR)/include/IntegralityBarrierSolver.h
 
 # clean - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
@@ -52,6 +56,20 @@ $(FWSlvSDR)/obj/FrankWolfeSolver.o: \
 	$(FWSlvSDR)/src/FrankWolfeSolver.cpp \
 	$(FWSlvSDR)/include/FrankWolfeSolver.h $(SMS++OBJ)
 	$(CC) -c $(FWSlvSDR)/src/FrankWolfeSolver.cpp -o $@ \
+	$(FWSlvINC) $(SMS++INC) $(SW)
+
+$(FWSlvSDR)/obj/IntegralityBarrierFunction.o: \
+	$(FWSlvSDR)/src/IntegralityBarrierFunction.cpp \
+	$(FWSlvSDR)/include/IntegralityBarrierFunction.h $(SMS++OBJ)
+	$(CC) -c $(FWSlvSDR)/src/IntegralityBarrierFunction.cpp -o $@ \
+	$(FWSlvINC) $(SMS++INC) $(SW)
+
+$(FWSlvSDR)/obj/IntegralityBarrierSolver.o: \
+	$(FWSlvSDR)/src/IntegralityBarrierSolver.cpp \
+	$(FWSlvSDR)/include/IntegralityBarrierSolver.h \
+	$(FWSlvSDR)/include/IntegralityBarrierFunction.h \
+	$(FWSlvSDR)/include/FrankWolfeSolver.h $(SMS++OBJ)
+	$(CC) -c $(FWSlvSDR)/src/IntegralityBarrierSolver.cpp -o $@ \
 	$(FWSlvINC) $(SMS++INC) $(SW)
 
 ########################## End of makefile ###################################

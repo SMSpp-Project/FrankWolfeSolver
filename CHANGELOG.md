@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `IntegralityBarrierFunction`, a `C05Function` built out of a `Block` of a
+  (mixed-)integer linear program: the sum over the integer variables of an
+  integrality penalty divided by the product of the normalised slacks of
+  the rows where each one appears, raised to exponents that weigh the rows,
+  with its gradient in the variables and in the exponents
+
+- `IntegralityBarrierSolver`, a heuristic for a feasible solution of the
+  integer program of its `Block`, which minimizes that function by a
+  `FrankWolfeSolver` whose oracle is a `Solver` of the linear relaxation,
+  stops as soon as a rounding is feasible and changes the exponents between
+  one run and the next
+
+- `intLineSearch` `LSFixed`, the fixed step `dblFWStep`, and `intInitPoint`,
+  which starts the vanilla method from the current values of the `Variable`
+
 - the tester registers to the father another Solver that never computes,
   which has to receive nothing from a `compute()` of many iterations, also
   when the father has a default channel of its own and when the oracle of a

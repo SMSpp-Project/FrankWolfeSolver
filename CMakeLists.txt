@@ -124,7 +124,9 @@ endif ()
 # but should be added to anything that links to it.
 # Note: do not GLOB files here.
 target_sources(${modName} PRIVATE
-        src/FrankWolfeSolver.cpp)
+        src/FrankWolfeSolver.cpp
+        src/IntegralityBarrierFunction.cpp
+        src/IntegralityBarrierSolver.cpp)
 
 # When using target_include_directories(), PUBLIC means that any targets
 # that link to this target also need that include directory.
@@ -176,6 +178,8 @@ install(TARGETS ${modName}
 # Install the headers
 install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/include/FrankWolfeSolver.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/IntegralityBarrierFunction.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/IntegralityBarrierSolver.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${modNamespace})
 
 # Install the auto-generated configuration header (see above).

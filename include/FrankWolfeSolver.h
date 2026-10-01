@@ -252,7 +252,14 @@ class FrankWolfeSolver : public CDASolver
  enum line_search_type {
   LSAuto     = 0 , ///< exact if the father objective is quadratic, else agnostic
   LSAgnostic = 1 , ///< the open-loop 2/(t+2) rule
-  LSExact    = 2   ///< exact line search (requires a quadratic total objective)
+  LSExact    = 2 , ///< exact line search (requires a quadratic total objective)
+  LSFixed    = 3   ///< the fixed step dblFWStep
+  };
+
+ /// where the iterates start from (value of intInitPoint)
+ enum init_point_type {
+  eInitLMO   = 0 , ///< the vertex the oracle gives at the current point
+  eInitBlock = 1   ///< the current values of the Variable of the Block
   };
 
  /// which direction the oracle is given (value of intFWDirection)
@@ -307,7 +314,10 @@ class FrankWolfeSolver : public CDASolver
   intLineSearch ,
   ///< which line search to use
   /**< One of the line_search_type values: LSAuto (default), LSAgnostic,
-   * LSExact. */
+   * LSExact, LSFixed; the last one takes the step dblFWStep at every
+   * iteration (no larger than the largest one the active-set variants
+   * allow), which is what a nonconvex linking function may want, the
+   * open-loop rule being made for the convex ones. */
 
   intLMOSlvr ,
   ///< index of the registered :Solver of each sub-Block to use as its LMO
@@ -434,6 +444,15 @@ class FrankWolfeSolver : public CDASolver
    * information the method has produced the direction is drawn from. Has no
    * effect under the other directions. Default 10. */
 
+  intInitPoint ,
+  ///< where the iterates start from
+  /**< One of the init_point_type values: eInitLMO (default), the vertex the
+   * oracle gives with the gradient at the current values of the Variable,
+   * or eInitBlock, those values themselves, which must then be a point of
+   * the feasible region, e.g., an interior one found beforehand; it is only
+   * available with AlgVanilla, the active-set variants starting from a
+   * vertex. A warm start [see intHandleMod] takes precedence over both. */
+
   intLastParFWSlv  ///< first allowed parameter value for derived classes
   };
 
@@ -457,6 +476,11 @@ class FrankWolfeSolver : public CDASolver
    * may well be 0, the objective being convex and not strongly so, and then
    * there is no stabilization and the direction is the gradient.
    */
+
+  dblFWStep ,
+  ///< the step of intLineSearch == LSFixed
+  /**< The step gamma in ( 0 , 1 ] that intLineSearch == LSFixed takes at
+   * every iteration. Default 0.75. */
 
   dblLastParFWSlv  ///< first allowed parameter value for derived classes
   };
@@ -867,6 +891,8 @@ class FrankWolfeSolver : public CDASolver
                         * compute_vanilla()]. */
  double f_t;           ///< dblFWt, the stabilization of that master problem
  int f_bundle_size;    ///< intFWBundleSize, how many pieces the master keeps
+ int f_init_point;     ///< intInitPoint, where the iterates start from
+ double f_step;        ///< dblFWStep, the step of LSFixed
 
  MasterProblemBlock * f_mpb = nullptr;
  ///< the master problem of eDirBundleMP, built once and kept

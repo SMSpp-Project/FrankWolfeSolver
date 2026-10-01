@@ -60,6 +60,8 @@
 #include "FakeSolver.h"
 #include "FRealObjective.h"
 #include "FrankWolfeSolver.h"
+#include "FRowConstraint.h"
+#include "IntegralityBarrierFunction.h"
 #include "LinearFunction.h"
 #include "OneVarConstraint.h"
 
@@ -330,6 +332,218 @@ bool check_other_solver( void )
  return( ok );
  }
 
+/*--------------------------------------------------------------------------*/
+/// the starting point eInitBlock takes and the step LSFixed takes: one
+/// iteration from a known point is ( 1 - gamma ) x0 + gamma v, v being the
+/// vertex of the box the oracle gives with the gradient at x0
+
+bool check_fixed_step( void )
+{
+ bool ok = true;
+ auto report = [ & ]( bool cond , const std::string & what ) {
+  std::cout << std::left << std::setw( 60 ) << what
+            << ( cond ? "  OK" : "  KO" ) << std::endl;
+  ok &= cond;
+  };
+
+ std::vector< LinearFunction * > costs;
+ auto father = build( costs );
+ auto fw = Solver::new_Solver( "FrankWolfeSolver" );
+ father->register_Solver( fw );
+ set_par( fw , "intLMOObj" , 2 );
+ set_par( fw , "intAlgorithm" , 0 );
+ set_par( fw , "intLineSearch" , int( FrankWolfeSolver::LSFixed ) );
+ set_par( fw , "dblFWStep" , 0.5 );
+ set_par( fw , "intInitPoint" , int( FrankWolfeSolver::eInitBlock ) );
+ set_par( fw , "intMaxIter" , 1 );
+
+ // x0 in the middle of each box, and the vertex the gradient of the father
+ // plus the sub-Block cost picks there
+ std::vector< double > expected( K * N );
+ for( int j = 0 ; j < K ; ++j ) {
+  auto x = father->get_nested_Blocks()[ j ]->get_static_variable_v<
+					     ColVariable >( "x" );
+  for( int i = 0 ; i < N ; ++i ) {
+   const auto & d = data[ j * N + i ];
+   const double x0 = ( d.l + d.u ) / 2;
+   ( *x )[ i ].set_value( x0 );
+   const double c = ( j * N + i == unpriced_coord ) ? 0 : d.c;
+   const double g = 2 * d.a * x0 + d.b + c;
+   const double v = g > 0 ? d.l : d.u;
+   expected[ j * N + i ] = 0.5 * x0 + 0.5 * v;
+   }
+  }
+ fw->compute( false );
+ fw->get_var_solution();
+ double err = 0;
+ for( int j = 0 ; j < K ; ++j ) {
+  auto x = father->get_nested_Blocks()[ j ]->get_static_variable_v<
+					     ColVariable >( "x" );
+  for( int i = 0 ; i < N ; ++i )
+   err = std::max( err , std::abs( ( *x )[ i ].get_value() -
+				   expected[ j * N + i ] ) );
+  }
+ report( err < 1e-12 , "eInitBlock and LSFixed: one step from x0, error " +
+	 std::to_string( err ) );
+
+ // the parameters are what was set, and the wrong values are refused
+ report( ( fw->get_int_par( fw->int_par_str2idx( "intInitPoint" ) ) ==
+	   FrankWolfeSolver::eInitBlock ) &&
+	 ( fw->get_dbl_par( fw->dbl_par_str2idx( "dblFWStep" ) ) == 0.5 ) ,
+	 "intInitPoint and dblFWStep read back" );
+ bool threw = false;
+ try { set_par( fw , "dblFWStep" , 0.0 ); }
+ catch( std::invalid_argument & ) { threw = true; }
+ report( threw , "dblFWStep 0 is refused" );
+ threw = false;
+ try { set_par( fw , "intInitPoint" , 2 ); }
+ catch( std::invalid_argument & ) { threw = true; }
+ report( threw , "intInitPoint 2 is refused" );
+ set_par( fw , "intAlgorithm" , 1 );
+ threw = false;
+ try { fw->compute( false ); }
+ catch( std::invalid_argument & ) { threw = true; }
+ report( threw , "eInitBlock with the active set is refused" );
+
+ father->unregister_Solver( fw );
+ delete fw;
+ for( auto sb : father->get_nested_Blocks() ) {
+  auto s = sb->get_registered_solvers().front();
+  sb->unregister_Solver( s );
+  delete s;
+  }
+ delete father;
+ return( ok );
+ }
+
+/*--------------------------------------------------------------------------*/
+/// the IntegralityBarrierFunction of a small Block against finite
+/// differences, in x and in y, and its rows
+
+bool check_barrier_function( void )
+{
+ bool ok = true;
+ auto report = [ & ]( bool cond , const std::string & what ) {
+  std::cout << std::left << std::setw( 60 ) << what
+            << ( cond ? "  OK" : "  KO" ) << std::endl;
+  ok &= cond;
+  };
+
+ // 5 variables, the first 4 integer in [ 0 , 2 ], the last continuous in
+ // [ 0 , 1 ]; rows with lhs only, rhs only, both (a range), an equality
+ const int n = 5;
+ AbstractBlock b;
+ auto x = new std::vector< ColVariable >( n );
+ for( int i = 0 ; i < 4 ; ++i )
+  ( *x )[ i ].set_type( ColVariable::kInteger );
+ b.add_static_variable( *x , "x" );
+ auto box = new std::vector< BoxConstraint >( n );
+ for( int i = 0 ; i < n ; ++i ) {
+  ( *box )[ i ].set_variable( & ( *x )[ i ] );
+  ( *box )[ i ].set_lhs( 0 );
+  ( *box )[ i ].set_rhs( i < 4 ? 2 : 1 );
+  }
+ b.add_static_constraint( *box , "box" );
+
+ auto rows = new std::vector< FRowConstraint >( 4 );
+ auto row = [ & ]( int r , std::vector< double > a , double lhs ,
+		   double rhs ) {
+  LinearFunction::v_coeff_pair cp;
+  for( int i = 0 ; i < n ; ++i )
+   if( a[ i ] != 0 )
+    cp.emplace_back( & ( *x )[ i ] , a[ i ] );
+  ( *rows )[ r ].set_function( new LinearFunction( std::move( cp ) ) );
+  ( *rows )[ r ].set_lhs( lhs );
+  ( *rows )[ r ].set_rhs( rhs );
+  };
+ const double INF = Inf< double >();
+ row( 0 , { 1 , 1 , 0 , 0 , 1 } , 1 , INF );         // x0 + x1 + x4 >= 1
+ row( 1 , { 0 , 1 , -2 , 1 , 0 } , - INF , 2 );      // x1 - 2 x2 + x3 <= 2
+ row( 2 , { 1 , 0 , 1 , 1 , 0.5 } , 1 , 5 );         // a range
+ row( 3 , { 1 , -1 , 0 , 0 , 0 } , 0 , 0 );          // an equality
+ b.add_static_constraint( *rows , "rows" );
+
+ IntegralityBarrierFunction f( 1e-6 );
+ f.build( & b );
+ report( ( f.get_num_active_var() == Block::Index( n ) ) &&
+	 ( f.get_rows().size() == 4 ) ,
+	 "the barrier has 4 rows: lhs, rhs, the 2 of the range" );
+
+ // a point well inside the polyhedron (the equality aside), and y in
+ // [ 0 , 1 ] with a 0
+ const std::vector< double > x0 = { 0.7 , 1.3 , 0.4 , 0.9 , 0.35 };
+ for( int i = 0 ; i < n ; ++i )
+  ( *x )[ i ].set_value( x0[ i ] );
+ f.set_y( { 0.8 , 0 , 0.5 , 1 } );
+ f.compute();
+ std::vector< double > g( n );
+ f.get_linearization_coefficients( g.data() );
+
+ const double h = 1e-6;
+ double err = 0;
+ for( int i = 0 ; i < n ; ++i ) {
+  ( *x )[ i ].set_value( x0[ i ] + h );
+  f.compute();
+  const double fp = f.get_value();
+  ( *x )[ i ].set_value( x0[ i ] - h );
+  f.compute();
+  const double fm = f.get_value();
+  ( *x )[ i ].set_value( x0[ i ] );
+  const double fd = ( fp - fm ) / ( 2 * h );
+  err = std::max( err , std::abs( fd - g[ i ] ) /
+		  std::max( 1.0 , std::abs( g[ i ] ) ) );
+  }
+ report( err < 1e-5 , "gradient in x against finite differences, error " +
+	 std::to_string( err ) );
+
+ // the gradient in y
+ f.compute();
+ std::vector< double > gy;
+ f.get_y_gradient( gy );
+ const auto y0 = f.get_y();
+ double erry = 0;
+ for( Block::Index k = 0 ; k < y0.size() ; ++k ) {
+  auto yp = y0 , ym = y0;
+  yp[ k ] += h;
+  ym[ k ] = std::max( ym[ k ] - h , 0.0 );
+  f.set_y( std::vector< double >( yp ) );
+  f.compute();
+  const double fp = f.get_value();
+  f.set_y( std::vector< double >( ym ) );
+  f.compute();
+  const double fm = f.get_value();
+  const double fd = ( fp - fm ) / ( yp[ k ] - ym[ k ] );
+  erry = std::max( erry , std::abs( fd - gy[ k ] ) /
+		   std::max( 1.0 , std::abs( gy[ k ] ) ) );
+  }
+ f.set_y( std::vector< double >( y0 ) );
+ report( erry < 1e-5 , "gradient in y against finite differences, error " +
+	 std::to_string( erry ) );
+
+ // an integer point: the penalty vanishes, whatever the barrier
+ for( int i = 0 ; i < n ; ++i )
+  ( *x )[ i ].set_value( i < 4 ? 1 : 0.5 );
+ f.compute();
+ report( f.get_value() < 1e-12 , "the value at an integer point is " +
+	 std::to_string( f.get_value() ) );
+
+ bool threw = false;
+ try { f.set_y( { 1 , 1 } ); }
+ catch( std::invalid_argument & ) { threw = true; }
+ report( threw , "set_y with the wrong number of exponents is refused" );
+ threw = false;
+ try { f.set_y( { 1 , -1 , 1 , 1 } ); }
+ catch( std::invalid_argument & ) { threw = true; }
+ report( threw , "a negative exponent is refused" );
+
+ b.reset_static_constraints();
+ b.reset_static_variables();
+ delete rows;
+ delete box;
+ delete x;
+ return( ok );
+ }
+
 }  // namespace
 
 /*--------------------------------------------------------------------------*/
@@ -404,6 +618,8 @@ int main( void )
   }
 
  all &= check_other_solver();
+ all &= check_fixed_step();
+ all &= check_barrier_function();
 
  std::cout << ( all ? "All tests passed!!" : "Some test FAILED!!" )
            << std::endl;

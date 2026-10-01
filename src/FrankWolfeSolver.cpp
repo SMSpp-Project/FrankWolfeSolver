@@ -69,7 +69,8 @@ SMSpp_insert_in_factory_cpp_0( FrankWolfeSolver );
 
 static const std::vector< std::string > FWSlv_int_pars_str = {
  "intLMOObj" , "intLineSearch" , "intLMOSlvr" , "intAlgorithm" , "intMaxAtoms" ,
- "intCvxComb" , "intHandleMod" , "intFWDirection" , "intFWBundleSize"
+ "intCvxComb" , "intHandleMod" , "intFWDirection" , "intFWBundleSize" ,
+ "intInitPoint"
  };
 
 /*--------------------------------------------------------------------------*/
@@ -78,7 +79,8 @@ static const std::vector< std::string > FWSlv_str_pars_str = { "strFWMPBCfg" };
 
 /*--------------------------------------------------------------------------*/
 
-static const std::vector< std::string > FWSlv_dbl_pars_str = { "dblFWt" };
+static const std::vector< std::string > FWSlv_dbl_pars_str = { "dblFWt" ,
+								  "dblFWStep" };
 
 /*--------------------------------------------------------------------------*/
 /*---------------------------- AUXILIARY ROUTINES --------------------------*/
@@ -97,6 +99,9 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_sigma       = 0;
  f_t_auto      = 0;
  f_t           = get_dflt_dbl_par( dblFWt );
+ f_bundle_size = get_dflt_int_par( intFWBundleSize );
+ f_init_point  = get_dflt_int_par( intInitPoint );
+ f_step        = get_dflt_dbl_par( dblFWStep );
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
  f_max_time    = get_dflt_dbl_par( dblMaxTime );
@@ -667,6 +672,12 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
                                   "must be at least 2" ) );
    f_bundle_size = value;
    return;
+  case( intInitPoint ):
+   if( ( value != eInitLMO ) && ( value != eInitBlock ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intInitPoint "
+                                  "must be 0 or 1" ) );
+   f_init_point = value;
+   return;
   case( intMaxThread ):  f_max_thread = value;  return;
   case( intMaxIter ):    f_max_iter = value;    return;
   case( intLogVerb ):    f_log_verb = value;    return;
@@ -689,6 +700,12 @@ void FrankWolfeSolver::set_par( idx_type par , double value )
    // problem, i.e. from the strong convexity of the father [see dblFWt]
    f_t = value;
    return;
+  case( dblFWStep ):
+   if( ! ( ( value > 0 ) && ( value <= 1 ) ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: dblFWStep "
+                                  "must be in ( 0 , 1 ]" ) );
+   f_step = value;
+   return;
   default:             CDASolver::set_par( par , value );
   }
  }
@@ -707,6 +724,7 @@ int FrankWolfeSolver::get_dflt_int_par( idx_type par ) const
   case( intHandleMod ):  return( eModReset );
   case( intFWDirection ): return( eDirGradient );
   case( intFWBundleSize ): return( 10 );
+  case( intInitPoint ):  return( eInitLMO );
   default:               return( CDASolver::get_dflt_int_par( par ) );
   }
  }
@@ -725,6 +743,7 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intHandleMod ):  return( f_handle_mod );
   case( intFWDirection ): return( f_direction );
   case( intFWBundleSize ): return( f_bundle_size );
+  case( intInitPoint ):  return( f_init_point );
   case( intMaxThread ):  return( f_max_thread );
   case( intMaxIter ):    return( f_max_iter );
   case( intLogVerb ):    return( f_log_verb );
@@ -743,6 +762,7 @@ double FrankWolfeSolver::get_dbl_par( idx_type par ) const
   case( dblAbsAcc ):   return( f_abs_acc );
   case( dblEveryTTm ): return( f_every_t );
   case( dblFWt ):      return( f_t );
+  case( dblFWStep ):   return( f_step );
   default:             return( CDASolver::get_dbl_par( par ) );
   }
  }
@@ -797,6 +817,8 @@ double FrankWolfeSolver::get_dflt_dbl_par( idx_type par ) const
 {
  if( par == dblFWt )
   return( 1 );
+ if( par == dblFWStep )
+  return( 0.75 );
 
  return( CDASolver::get_dflt_dbl_par( par ) );
  }
@@ -1529,6 +1551,10 @@ int FrankWolfeSolver::compute( bool changedvars )
    }
   } guard{ this };
 
+ if( ( f_init_point == eInitBlock ) && ( f_algorithm != AlgVanilla ) )
+  throw( std::invalid_argument( "FrankWolfeSolver::compute: intInitPoint "
+                                "eInitBlock needs intAlgorithm AlgVanilla" ) );
+
  int status;
  try {
   open_father_channel();
@@ -1712,6 +1738,19 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    cbar += d.fun->get_value();
    }
   }
+ else
+  if( f_init_point == eInitBlock ) {
+   // the current values of the Variable are the starting point, and the
+   // sub-Block cost there is what the convex combination starts from
+   delete f_x;
+   f_x = f_Block->get_Solution( nullptr , false );
+   cbar = 0;
+   for( auto & d : v_sb ) {
+    d.fun->compute( true );
+    cbar += d.fun->get_value();
+    }
+   f_has_sol = true;
+   }
  else {
   evaluate_gradient();
   p_dir = & f_grad;          // nothing recorded yet: this is the gradient
@@ -1836,7 +1875,10 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
             ? OFValue( 1 ) : OFValue( 0 );
    }
   else
-   gamma = OFValue( 2 ) / OFValue( t + 2 );      // Agnostic open-loop rule
+   if( f_line_search == LSFixed )
+    gamma = f_step;
+   else
+    gamma = OFValue( 2 ) / OFValue( t + 2 );     // Agnostic open-loop rule
 
   // x <- ( 1 - gamma ) x + gamma v ; cbar <- ( 1 - gamma ) cbar + gamma cv
   Solution * v_sol = f_Block->get_Solution( nullptr , false );
@@ -2091,7 +2133,9 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
             ? OFValue( gamma_max ) : OFValue( 0 );
    }
   else
-   gamma = std::min( OFValue( gamma_max ) , OFValue( 2 ) / OFValue( t + 2 ) );
+   gamma = std::min( OFValue( gamma_max ) ,
+                     f_line_search == LSFixed ? OFValue( f_step )
+                     : OFValue( 2 ) / OFValue( t + 2 ) );
 
   // apply the step: update the iterate and the active set - - - - - - - - - -
 
