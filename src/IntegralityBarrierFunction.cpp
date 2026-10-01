@@ -12,7 +12,11 @@
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \copyright &copy; by Antonio Frangioni, Donato Meoli
+ * \author Francesca Demelas \n
+ *         LIPN \n
+ *         Universite' Sorbonne Paris Nord \n
+ *
+ * \copyright &copy; by Antonio Frangioni, Donato Meoli, Francesca Demelas
  */
 /*--------------------------------------------------------------------------*/
 /*------------------------------ INCLUDES ----------------------------------*/
