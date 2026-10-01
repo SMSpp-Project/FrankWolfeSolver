@@ -18,7 +18,7 @@
  *         Universita' di Pisa \n
  *
  * \author Francesca Demelas \n
- *         LIPN \n
+ *         Laboratoire d'Informatique de Paris Nord \n
  *         Universite' Sorbonne Paris Nord \n
  *
  * \copyright &copy; by Antonio Frangioni, Donato Meoli, Francesca Demelas
