@@ -46,6 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `IntegralityBarrierSolver` no longer restates what the parameters of its
+  `FrankWolfeSolver` say, nor sets them: the `ComputeConfig` of `strFWCfg`
+  says where the runs start from (`intInitPoint`, the current values of the
+  Variable being `eInitBlock`), which Solver of the copy is the oracle
+  (`intLMOSlvr`) and how often the rounding is looked at (`intEverykIt`,
+  which the class used to set to 1, 0 now looking at it only at the end of
+  each run); the oracle is registered to the copy by the `BlockSolverConfig`
+  of the file `strLMOBSCfg`, and `intInitSlvr` only says the Solver of the
+  Block whose solution is written into the Variable before Frank-Wolfe
+  starts (-1, the default, none). The time of each run is what is left of
+  `dblMaxTime` of the class, if smaller than that of `strFWCfg`
+
 - the checks on what the Block holds ask it for its groups of Variable and of
   Constraint, the vectors of `boost::any` they used to ask for not being
   there any more
@@ -64,6 +76,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   undone when the Solver detaches, so that the Block is left as it was found.
   What is refused is only a Variable of no sub-Block at all, which the
   decomposition cannot move
+
+### Removed
+
+- `strLMOSolver` and `strLMOCfg` of `IntegralityBarrierSolver`, replaced by
+  the `BlockSolverConfig` of `strLMOBSCfg`, and the value -2 of
+  `intInitSlvr`, replaced by `intInitPoint` `eInitBlock` of the
+  `FrankWolfeSolver`
 
 ### Fixed
 

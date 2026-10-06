@@ -36,6 +36,7 @@
 /*--------------------------------------------------------------------------*/
 
 #include "AbstractBlock.h"
+#include "BlockSolverConfig.h"
 #include "FRealObjective.h"
 #include "IntegralityBarrierFunction.h"
 #include "Solution.h"
@@ -60,36 +61,41 @@ namespace SMSpp_di_unipi_it
  * an AbstractBlock read out of an MPS file. It minimizes the
  * IntegralityBarrierFunction of the Block [see IntegralityBarrierFunction.h]
  * over the polyhedron of its continuous relaxation by a FrankWolfeSolver,
- * whose oracle is a Solver registered to the Block that solves the linear
- * relaxation: the one of name strLMOSolver, with the ComputeConfig of the
- * file strLMOCfg. Since the integer points are the global minima of the
- * function, the iterates are hoped to get to one of them.
+ * whose oracle is a Solver that solves the linear relaxation, e.g., a
+ * :MILPSolver with intRelaxIntVars 1, registered by the BlockSolverConfig of
+ * the file strLMOBSCfg. Since the integer points are the global minima of
+ * the function, the iterates are hoped to get to one of them.
  *
  * To do so, at the first compute() an abstract copy of the Block is made
  * [see AbstractBlock::mirror()], the only sub-Block of an AbstractBlock of
  * its own, whose Objective is the IntegralityBarrierFunction of the copy,
  * and to which a FrankWolfeSolver is registered with the ComputeConfig of
- * the file strFWCfg; the oracle is registered to the copy. Nothing touches
- * the Block or the Solver registered to it, and the copy is made again at
- * the compute() after any Modification of the Block. The point found is
- * mapped back to the Block, and kept only if it is feasible there too, the
- * copy being a relaxation of the Block if mirror() could not reproduce all
- * of it. Then:
+ * the file strFWCfg; the BlockSolverConfig of strLMOBSCfg is applied to the
+ * copy, and the oracle is the Solver it registers there at the position
+ * intLMOSlvr of the FrankWolfeSolver. Nothing touches the Block or the
+ * Solver registered to it, and the copy is made again at the compute()
+ * after any Modification of the Block. The point found is mapped back to
+ * the Block, and kept only if it is feasible there too, the copy being a
+ * relaxation of the Block if mirror() could not reproduce all of it. Then:
  *
- * - the starting point x0 is, with intInitSlvr >= 0, the solution of the
- *   Solver registered to the Block at that position, e.g., the linear
- *   relaxation by a barrier method without crossover, which is a point in
- *   the interior of the polyhedron; with -2, the current values of the
- *   Variable; with -1 (the default) there is none, and each run of
- *   Frank-Wolfe starts from the vertex the oracle gives at the current
- *   values of the Variable;
+ * - where each run of Frank-Wolfe starts from is what intInitPoint of the
+ *   FrankWolfeSolver says: with eInitBlock (and AlgVanilla) the starting
+ *   point x0 is the current values of the Variable, written again at the
+ *   start of each run; with eInitLMO (the default) there is none, and each
+ *   run starts from the vertex the oracle gives at the current values of the
+ *   Variable. With intInitSlvr >= 0, those values are first set to the
+ *   solution of the Solver registered to the Block at that position, e.g.,
+ *   the linear relaxation by a barrier method without crossover, which is a
+ *   point in the interior of the polyhedron;
  *
  * - all the exponents y of the rows start at 0, and then, intMaxIter times
  *   at most: Frank-Wolfe starts from x0 with the current y, stopping as soon
  *   as rounding the integer Variable of the vertex the oracle has given or
- *   of the iterate gives a feasible point; if that never happens, the
- *   exponents are changed by the rule of dblYLevel and x0 is moved towards
- *   the last iterate by dblX0Step.
+ *   of the iterate gives a feasible point, which is looked at every
+ *   intEverykIt iterations of the FrankWolfeSolver (if it is not 0) and at
+ *   the end of each run; if that never happens, the exponents are changed
+ *   by the rule of dblYLevel and x0 is moved towards the last iterate by
+ *   dblX0Step.
  *
  * The rule changing the exponents takes, for every row whose normalised
  * slack exceeds dblYLevel, the largest step along the projected gradient of
@@ -127,10 +133,11 @@ class IntegralityBarrierSolver : public Solver
   intInitSlvr = intLastAlgPar ,  ///< the Solver of the starting point
                                  /**< The position, among the Solver
 				  * registered to the Block, of the one whose
-				  * solution is the starting point; -2 means
-				  * the current values of the Variable, and -1
-				  * (the default) no starting point but the
-				  * vertex of the oracle [see the class]. */
+				  * solution is written into the Variable
+				  * before Frank-Wolfe starts [see the class];
+				  * -1 (the default) means none. Where the runs
+				  * start from is intInitPoint of the
+				  * FrankWolfeSolver [see strFWCfg]. */
   intPsi ,                       ///< the form of the penalty
                                  /**< The form of the integrality penalty of
 				  * the function, a value of
@@ -166,21 +173,21 @@ class IntegralityBarrierSolver : public Solver
  enum str_par_type_IBSlv {
   strFWCfg = strLastAlgPar ,     ///< the ComputeConfig of the Frank-Wolfe
                                  /**< The file of the ComputeConfig of the
-				  * FrankWolfeSolver; empty (the default)
-				  * means its default parameters, save those
-				  * the class sets (intInitPoint, intLMOSlvr
-				  * and intEverykIt). */
-  strLMOSolver ,                 ///< the name of the Solver of the oracle
-                                 /**< The name of the Solver that solves the
-				  * linear relaxation [see the class], e.g., a
-				  * :MILPSolver; empty by default, which
-				  * compute() refuses. */
-  strLMOCfg ,                    ///< the ComputeConfig of the oracle
-                                 /**< The file of the ComputeConfig of the
-				  * Solver of strLMOSolver, which has to make
-				  * it solve the linear relaxation (e.g.,
-				  * intRelaxIntVars 1 for a :MILPSolver);
-				  * empty by default. */
+				  * FrankWolfeSolver, which says, among the
+				  * rest, where the runs start from
+				  * (intInitPoint), which Solver of the copy is
+				  * the oracle (intLMOSlvr) and how often the
+				  * rounding is looked at (intEverykIt); empty
+				  * (the default) means its default
+				  * parameters. Its dblMaxTime is lowered to
+				  * what is left of that of this Solver. */
+  strLMOBSCfg ,                  ///< the BlockSolverConfig of the oracle
+                                 /**< The file of the BlockSolverConfig
+				  * applied to the copy of the Block [see the
+				  * class], which registers there the Solver
+				  * of the linear relaxation, e.g., a
+				  * :MILPSolver with intRelaxIntVars 1; empty
+				  * by default, which compute() refuses. */
   strLastAlgParIBSlv             ///< first new string parameter of derived
                                  ///< classes
   };
@@ -334,9 +341,10 @@ class IntegralityBarrierSolver : public Solver
  double f_x0_step = 0;          ///< dblX0Step
  double f_eps = 1e-8;           ///< dblBarrierEps
  std::string f_fw_cfg;          ///< strFWCfg
- std::string f_lmo_name;        ///< strLMOSolver
- std::string f_lmo_cfg;         ///< strLMOCfg
- Solver * f_lmo = nullptr;      ///< the Solver of the oracle, if it is ours
+ std::string f_lmo_bscfg;       ///< strLMOBSCfg
+ BlockSolverConfig * f_lmo_bsc = nullptr;  ///< strLMOBSCfg, cleared once
+                                           ///< applied to the copy
+ double f_fw_max_time = Inf< double >();  ///< dblMaxTime of strFWCfg
 
  Block * f_father = nullptr;    ///< the AbstractBlock made by build()
  AbstractBlock * f_copy = nullptr;  ///< the abstract copy of the Block

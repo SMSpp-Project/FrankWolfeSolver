@@ -66,9 +66,8 @@ class FatherBlock : public AbstractBlock
 const std::array< std::string , 2 > int_names = { "intInitSlvr" , "intPsi" };
 const std::array< std::string , 3 > dbl_names = { "dblYLevel" , "dblX0Step" ,
 						   "dblBarrierEps" };
-const std::array< std::string , 3 > str_names = { "strFWCfg" ,
-						   "strLMOSolver" ,
-						   "strLMOCfg" };
+const std::array< std::string , 2 > str_names = { "strFWCfg" ,
+						   "strLMOBSCfg" };
 
 // the linear terms of the Objective of the Block inside the copy moved into
 // the Objective of the copy itself, which is the one FrankWolfeSolver
@@ -81,8 +80,9 @@ void fold_objectives( AbstractBlock * copy )
  auto rlf = robj ? dynamic_cast< LinearFunction * >( robj->get_function() )
 		 : nullptr;
  if( ( ! rlf ) && ( ! copy->get_nested_Blocks().empty() ) )
-  throw( std::invalid_argument( "IntegralityBarrierSolver: the Objective of "
-				"a Block with sub-Block is not linear" ) );
+  throw( std::invalid_argument( "IntegralityBarrierSolver::build: the "
+				"Objective of a Block with sub-Block is not "
+				"linear" ) );
 
  std::vector< Block * > tree( copy->get_nested_Blocks().begin() ,
 			      copy->get_nested_Blocks().end() );
@@ -94,8 +94,8 @@ void fold_objectives( AbstractBlock * copy )
    continue;
   auto lf = dynamic_cast< LinearFunction * >( obj->get_function() );
   if( ! lf )
-   throw( std::invalid_argument( "IntegralityBarrierSolver: the Objective "
-				 "of a sub-Block is not linear" ) );
+   throw( std::invalid_argument( "IntegralityBarrierSolver::build: the "
+				 "Objective of a sub-Block is not linear" ) );
   const double sign = ( obj->get_sense() == robj->get_sense() ) ? 1 : -1;
   for( Block::Index i = 0 ; i < lf->get_num_active_var() ; ++i ) {
    const auto c = lf->get_coefficient( i );
@@ -124,7 +124,7 @@ void apply_cfg( Solver * s , const std::string & fn )
  auto cc = dynamic_cast< ComputeConfig * >( c );
  if( ! cc ) {
   delete c;
-  throw( std::invalid_argument( "IntegralityBarrierSolver: " + fn +
+  throw( std::invalid_argument( "IntegralityBarrierSolver::build: " + fn +
 				" holds no ComputeConfig" ) );
   }
  s->set_ComputeConfig( cc );
@@ -159,9 +159,10 @@ void IntegralityBarrierSolver::build( void )
  if( f_father )
   return;
 
- if( f_lmo_name.empty() )
-  throw( std::invalid_argument( "IntegralityBarrierSolver: no Solver of "
-				"the oracle [strLMOSolver]" ) );
+ if( f_lmo_bscfg.empty() )
+  throw( std::invalid_argument( "IntegralityBarrierSolver::build: no "
+				"BlockSolverConfig of the oracle "
+				"[strLMOBSCfg]" ) );
 
  // the father, whose only sub-Block is the abstract copy of the Block and
  // whose Objective is the function of the copy: nothing of what follows
@@ -183,19 +184,22 @@ void IntegralityBarrierSolver::build( void )
  father->set_objective( f_obj.get() , eNoMod );
  f_father = father;
 
- // the oracle, on the copy
- f_lmo = Solver::new_Solver( f_lmo_name );
- if( ! f_lmo )
-  throw( std::invalid_argument( "IntegralityBarrierSolver: no Solver named "
-				+ f_lmo_name ) );
- apply_cfg( f_lmo , f_lmo_cfg );
- f_copy->register_Solver( f_lmo );
+ // the oracle, on the copy; the BlockSolverConfig, once cleared, is what
+ // takes away the Solver it has registered [see unbuild()]
+ auto c = Configuration::deserialize( f_lmo_bscfg );
+ f_lmo_bsc = dynamic_cast< BlockSolverConfig * >( c );
+ if( ! f_lmo_bsc ) {
+  delete c;
+  throw( std::invalid_argument( "IntegralityBarrierSolver::build: " +
+				f_lmo_bscfg + " holds no "
+				"BlockSolverConfig" ) );
+  }
+ f_lmo_bsc->apply( f_copy );
+ f_lmo_bsc->clear();
 
  f_fw = Solver::new_Solver( "FrankWolfeSolver" );
  apply_cfg( f_fw , f_fw_cfg );
- // what the method needs whatever the ComputeConfig: the rounding is looked
- // at every iteration
- f_fw->set_par( intEverykIt , 1 );
+ f_fw_max_time = f_fw->get_dbl_par( dblMaxTime );
  f_father->register_Solver( f_fw );
  }
 
@@ -206,10 +210,15 @@ void IntegralityBarrierSolver::unbuild( void )
  if( ! f_father )
   return;
 
- f_father->unregister_Solver( f_fw , true );
- f_fw = nullptr;
- f_copy->unregister_Solver( f_lmo , true );
- f_lmo = nullptr;
+ if( f_fw ) {
+  f_father->unregister_Solver( f_fw , true );
+  f_fw = nullptr;
+  }
+ if( f_lmo_bsc ) {
+  f_lmo_bsc->apply( f_copy );
+  delete f_lmo_bsc;
+  f_lmo_bsc = nullptr;
+  }
 
  // the Objective, which deletes the function, goes while the Variable of
  // the copy it is active in are still there
@@ -356,15 +365,14 @@ int IntegralityBarrierSolver::compute( bool changedvars )
    }
 
   build();
-  if( f_init_slvr != -1 )  // the starting point, into the copy
+
+  // where each run of Frank-Wolfe starts from: x0, written into the copy at
+  // the start of each run, or the vertex of the oracle
+  const bool init_x0 = ( f_fw->get_int_par( FrankWolfeSolver::intInitPoint )
+			 == FrankWolfeSolver::eInitBlock );
+  if( init_x0 || ( f_init_slvr >= 0 ) )  // the values, into the copy
    f_Block->map_forward_solution( f_copy );
   Solution * x0 = f_copy->get_Solution( nullptr , false );
-
-  // where each run of Frank-Wolfe starts from; the oracle is the only
-  // Solver of the copy
-  f_fw->set_par( FrankWolfeSolver::intInitPoint , int( f_init_slvr == -1 ?
-		  FrankWolfeSolver::eInitLMO : FrankWolfeSolver::eInitBlock ) );
-  f_fw->set_par( FrankWolfeSolver::intLMOSlvr , 0 );
 
   // Frank-Wolfe stops as soon as the rounding of the vertex the oracle has
   // left in the Variable, or of the iterate, is feasible
@@ -389,9 +397,11 @@ int IntegralityBarrierSolver::compute( bool changedvars )
     status = kStopTime;
     break;
     }
-   if( f_init_slvr != -1 )
+   if( init_x0 )
     x0->write( f_copy );
-   f_fw->set_par( dblMaxTime , std::max( f_max_time - elapsed() , 0.0 ) );
+   // the time of the run, what is left of that of compute() at most
+   f_fw->set_par( dblMaxTime , std::min( f_fw_max_time ,
+				 std::max( f_max_time - elapsed() , 0.0 ) ) );
    if( f_fw->compute( false ) == kInfeasible ) {  // the linear relaxation is
     status = kInfeasible;                         // empty, so is the program
     ++f_runs;
@@ -477,7 +487,15 @@ void IntegralityBarrierSolver::get_var_solution( Configuration * solc )
 void IntegralityBarrierSolver::set_par( idx_type par , int value )
 {
  switch( par ) {
-  case( intInitSlvr ): f_init_slvr = value; return;
+  case( intInitSlvr ):
+   if( value < -1 )
+    throw( std::invalid_argument( "IntegralityBarrierSolver::set_par: "
+				  "intInitSlvr is -1 or the position of a "
+				  "Solver; starting from the current values "
+				  "is intInitPoint eInitBlock of the "
+				  "FrankWolfeSolver [strFWCfg]" ) );
+   f_init_slvr = value;
+   return;
   case( intPsi ):
    f_psi = value;
    if( f_fun )
@@ -518,8 +536,7 @@ void IntegralityBarrierSolver::set_par( idx_type par , std::string && value )
    throw( std::logic_error( "IntegralityBarrierSolver::set_par: " +
 			    str_names[ par - strFWCfg ] + " cannot change "
 			    "after the first compute()" ) );
-  ( par == strFWCfg ? f_fw_cfg : par == strLMOSolver ? f_lmo_name
-					      : f_lmo_cfg ) = std::move( value );
+  ( par == strFWCfg ? f_fw_cfg : f_lmo_bscfg ) = std::move( value );
   return;
   }
  Solver::set_par( par , std::move( value ) );
@@ -595,10 +612,9 @@ const std::string & IntegralityBarrierSolver::get_str_par( idx_type par )
  const
 {
  switch( par ) {
-  case( strFWCfg ):     return( f_fw_cfg );
-  case( strLMOSolver ): return( f_lmo_name );
-  case( strLMOCfg ):    return( f_lmo_cfg );
-  default:              return( Solver::get_str_par( par ) );
+  case( strFWCfg ):    return( f_fw_cfg );
+  case( strLMOBSCfg ): return( f_lmo_bscfg );
+  default:             return( Solver::get_str_par( par ) );
   }
  }
 
