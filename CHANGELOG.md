@@ -27,9 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `IntegralityBarrierSolver`, a heuristic for a feasible solution of the
   integer program of its `Block`, which minimizes that function by a
-  `FrankWolfeSolver` whose oracle is a `Solver` of the linear relaxation,
-  stops as soon as a rounding is feasible and changes the exponents between
-  one run and the next
+  `FrankWolfeSolver` whose oracle is a `Solver` of the linear relaxation, stops
+  as soon as a rounding is feasible and changes the exponents between one run
+  and the next. What Frank-Wolfe does is said by the `ComputeConfig` of
+  `strFWCfg`, i.e., where the runs start from (`intInitPoint`, the current
+  values of the Variable being `eInitBlock`), which Solver of the copy is the
+  oracle (`intLMOSlvr`) and how often the rounding is looked at (`intEverykIt`,
+  0 looking at it only at the end of each run); the oracle is registered to the
+  copy by the `BlockSolverConfig` of the file `strLMOBSCfg`, `intInitSlvr` says
+  the Solver of the Block whose solution is written into the Variable before
+  Frank-Wolfe starts (-1, the default, none), and the time of each run is what
+  is left of `dblMaxTime` of the class, if smaller than that of `strFWCfg`
 
 - `intLineSearch` `LSFixed`, the fixed step `dblFWStep`, and `intInitPoint`,
   which starts the vanilla method from the current values of the `Variable`
@@ -54,18 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `IntegralityBarrierSolver` no longer restates what the parameters of its
-  `FrankWolfeSolver` say, nor sets them: the `ComputeConfig` of `strFWCfg`
-  says where the runs start from (`intInitPoint`, the current values of the
-  Variable being `eInitBlock`), which Solver of the copy is the oracle
-  (`intLMOSlvr`) and how often the rounding is looked at (`intEverykIt`,
-  which the class used to set to 1, 0 now looking at it only at the end of
-  each run); the oracle is registered to the copy by the `BlockSolverConfig`
-  of the file `strLMOBSCfg`, and `intInitSlvr` only says the Solver of the
-  Block whose solution is written into the Variable before Frank-Wolfe
-  starts (-1, the default, none). The time of each run is what is left of
-  `dblMaxTime` of the class, if smaller than that of `strFWCfg`
-
 - the checks on what the Block holds ask it for its groups of Variable and of
   Constraint, the vectors of `boost::any` they used to ask for not being
   there any more
@@ -86,11 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decomposition cannot move
 
 ### Removed
-
-- `strLMOSolver` and `strLMOCfg` of `IntegralityBarrierSolver`, replaced by
-  the `BlockSolverConfig` of `strLMOBSCfg`, and the value -2 of
-  `intInitSlvr`, replaced by `intInitPoint` `eInitBlock` of the
-  `FrankWolfeSolver`
 
 ### Fixed
 
