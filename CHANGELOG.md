@@ -97,8 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   What is refused is only a Variable of no sub-Block at all, which the
   decomposition cannot move
 
-### Removed
-
 ### Fixed
 
 - the pieces of the bundle directions kept from a previous `compute()` are
