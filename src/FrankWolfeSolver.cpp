@@ -70,7 +70,7 @@ SMSpp_insert_in_factory_cpp_0( FrankWolfeSolver );
 static const std::vector< std::string > FWSlv_int_pars_str = {
  "intLMOObj" , "intLineSearch" , "intLMOSlvr" , "intAlgorithm" , "intMaxAtoms" ,
  "intCvxComb" , "intHandleMod" , "intFWDirection" , "intFWBundleSize" ,
- "intInitPoint"
+ "intInitPoint" , "intFWOnReject" , "intFWBestLB"
  };
 
 /*--------------------------------------------------------------------------*/
@@ -104,6 +104,9 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_init_point  = get_dflt_int_par( intInitPoint );
  f_step        = get_dflt_dbl_par( dblFWStep );
  f_accept      = get_dflt_dbl_par( dblFWAccept );
+ f_on_reject   = get_dflt_int_par( intFWOnReject );
+ f_use_best    = get_dflt_int_par( intFWBestLB );
+ f_best_bound  = 0;
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
  f_max_time    = get_dflt_dbl_par( dblMaxTime );
@@ -663,9 +666,9 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
   case( intCvxComb ):    f_cvx_comb = value;    return;
   case( intHandleMod ):  f_handle_mod = value;  return;
   case( intFWDirection ):
-   if( ( value < eDirGradient ) || ( value > eDirBundleMP ) )
+   if( ( value < eDirGradient ) || ( value > eDirAggregate ) )
     throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWDirection "
-                                  "must be between 0 and 2" ) );
+                                  "must be between 0 and 3" ) );
    f_direction = value;
    return;
   case( intFWBundleSize ):
@@ -679,6 +682,18 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
     throw( std::invalid_argument( "FrankWolfeSolver::set_par: intInitPoint "
                                   "must be 0 or 1" ) );
    f_init_point = value;
+   return;
+  case( intFWOnReject ):
+   if( ( value != eRejGradient ) && ( value != eRejCorrect ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWOnReject "
+                                  "must be 0 or 1" ) );
+   f_on_reject = value;
+   return;
+  case( intFWBestLB ):
+   if( ( value != 0 ) && ( value != 1 ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWBestLB "
+                                  "must be 0 or 1" ) );
+   f_use_best = value;
    return;
   case( intMaxThread ):  f_max_thread = value;  return;
   case( intMaxIter ):    f_max_iter = value;    return;
@@ -733,6 +748,8 @@ int FrankWolfeSolver::get_dflt_int_par( idx_type par ) const
   case( intFWDirection ): return( eDirGradient );
   case( intFWBundleSize ): return( 10 );
   case( intInitPoint ):  return( eInitLMO );
+  case( intFWOnReject ): return( eRejGradient );
+  case( intFWBestLB ):   return( 0 );
   default:               return( CDASolver::get_dflt_int_par( par ) );
   }
  }
@@ -752,6 +769,8 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intFWDirection ): return( f_direction );
   case( intFWBundleSize ): return( f_bundle_size );
   case( intInitPoint ):  return( f_init_point );
+  case( intFWOnReject ): return( f_on_reject );
+  case( intFWBestLB ):   return( f_use_best );
   case( intMaxThread ):  return( f_max_thread );
   case( intMaxIter ):    return( f_max_iter );
   case( intLogVerb ):    return( f_log_verb );
@@ -1025,6 +1044,11 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
   return;
   }
 
+ if( f_direction == eDirAggregate ) {
+  aggregate_direction( fx );
+  return;
+  }
+
  if( f_direction != eDirBundle ) {
   p_dir = & f_grad;
   return;
@@ -1093,6 +1117,111 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
  f_pgrad = f_grad;
  f_pxval = f_xval;
  f_pval = fx;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::aggregate_direction( OFValue fx )
+{
+ const Index G = Index( f_grad.size() );
+
+ /* The two pieces are the gradient g at the current iterate x, whose error
+  * there is 0, and the aggregate a with constant b, whose error at x is
+  * sigma = f( x ) - b - < a , x >, non-negative since the aggregate is a
+  * combination of linearizations of the convex linking function. The master
+  * problem is, in its dual form,
+  *
+  *   min { lambda sigma + ( t / 2 ) || g + lambda ( a - g ) ||^2 :
+  *         lambda in [ 0 , 1 ] }
+  *
+  * whose solution is written down at once, and the aggregate of the next
+  * iteration is the combination it chooses, whatever happens to the
+  * direction afterwards. */
+
+ // the constant of the piece of the gradient at x: f( x ) - < g , x >
+ OFValue bc = fx;
+ for( Index p = 0 ; p < G ; ++p )
+  bc -= f_grad[ p ] * f_xval[ p ];
+
+ const OFValue t = stab_weight();
+ OFValue lambda = 0;
+
+ if( ( f_agg.size() == G ) && ( t > 0 ) ) {
+  // what is below 0 is numerical noise
+  OFValue sigma = fx - f_agg_b;
+  for( Index p = 0 ; p < G ; ++p )
+   sigma -= f_agg[ p ] * f_xval[ p ];
+  if( sigma < 0 )
+   sigma = 0;
+
+  OFValue gd = 0 , dd = 0;
+  for( Index p = 0 ; p < G ; ++p ) {
+   const auto di = f_agg[ p ] - f_grad[ p ];
+   gd += f_grad[ p ] * di;
+   dd += di * di;
+   }
+
+  if( dd > 0 )
+   lambda = std::min( OFValue( 1 ) ,
+                      std::max( OFValue( 0 ) , - ( sigma + t * gd ) /
+                                               ( t * dd ) ) );
+
+  if( lambda > 0 ) {
+   f_bdir.resize( G );
+   for( Index p = 0 ; p < G ; ++p )
+    f_bdir[ p ] = f_grad[ p ] + lambda * ( f_agg[ p ] - f_grad[ p ] );
+   p_dir = & f_bdir;
+   f_sigma = lambda * sigma;
+   }
+  else
+   p_dir = & f_grad;
+
+  for( Index p = 0 ; p < G ; ++p )
+   f_agg[ p ] = f_grad[ p ] + lambda * ( f_agg[ p ] - f_grad[ p ] );
+  f_agg_b = bc + lambda * ( f_agg_b - bc );
+  }
+ else {
+  // no aggregate yet, or no stabilization: the direction is the gradient,
+  // and the aggregate starts from its piece
+  p_dir = & f_grad;
+  f_agg.assign( f_grad.begin() , f_grad.end() );
+  f_agg_b = bc;
+  }
+ }
+
+/*--------------------------------------------------------------------------*/
+
+bool FrankWolfeSolver::correct_direction( OFValue dec , OFValue cert )
+{
+ // only a direction that decreases the function can be corrected, and only
+ // when intFWOnReject asks for it
+ if( ( f_on_reject != eRejCorrect ) || ( ! ( dec > 0 ) ) ||
+     ( ! ( cert > dec ) ) )
+  return( false );
+
+ /* With z the refused direction, U = cert the bound it gives and G = dec the
+  * decrease the gradient g promises towards its vertex, 0 < G < eta U, the
+  * direction ( 1 - lambda ) g + lambda z with the lambda below is an
+  * approximate subgradient with error lambda sigma*, and the step towards
+  * its vertex passes the test of dblFWAccept (Iommazzo, Rinaldi, Frangioni,
+  * the certified correction): the current piece having error 0, the
+  * combination gives a bound of at most ( 1 - lambda ) G+ + lambda U, G+ >= G
+  * being the decrease towards the new vertex. */
+
+ const OFValue lambda = ( 1 - f_accept ) * dec / ( f_accept * ( cert - dec ) );
+ if( ! ( ( lambda > 0 ) && ( lambda < 1 ) ) )
+  return( false );
+
+ const Index G = Index( f_grad.size() );
+ const auto & dir = *p_dir;
+ std::vector< Function::FunctionValue > cdir( G );
+ for( Index p = 0 ; p < G ; ++p )
+  cdir[ p ] = f_grad[ p ] + lambda * ( dir[ p ] - f_grad[ p ] );
+ f_bdir = std::move( cdir );
+ p_dir = & f_bdir;
+ f_sigma *= lambda;
+ ++f_n_corrected;
+ return( true );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -1577,7 +1706,15 @@ int FrankWolfeSolver::compute( bool changedvars )
    }
   } guard{ this };
 
- f_n_accepted = f_n_rejected = 0;
+ f_n_accepted = f_n_rejected = f_n_corrected = 0;
+ f_best_bound = f_max ? Inf< OFValue >() : - Inf< OFValue >();
+
+ // the pieces kept from a previous compute() are linearizations of the
+ // linking function as it was then, which a Modification may have changed
+ // since: below it no more, they would give a direction and a bound that
+ // are not valid, and they are dropped
+ f_pgrad.clear();
+ f_agg.clear();
 
  int status;
  try {
@@ -1615,9 +1752,12 @@ int FrankWolfeSolver::compute( bool changedvars )
          << ", gap " << f_last_gap << ", status " << status;
   if( f_algorithm != AlgVanilla )
    *f_log << ", |A| " << f_aset.size();
-  if( f_n_accepted + f_n_rejected )
+  if( f_n_accepted + f_n_rejected ) {
    *f_log << ", directions " << f_n_accepted << " taken and "
           << f_n_rejected << " refused";
+   if( f_n_corrected )
+    *f_log << " (" << f_n_corrected << " corrected)";
+   }
   *f_log << std::endl;
   }
 
@@ -1832,6 +1972,7 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    * is already small enough to stop [see the class documentation]. */
 
   OFValue mx_sum , mv_sum , cv , gx , cost_x , gap;
+  bool corrected = false;
   for( ; ; ) {
    scatter();
    mx_sum = eval_modified_objective();           // sum_j M_j(x_j)
@@ -1883,6 +2024,16 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
                : ( cost_x_dir - mv_dir + f_sigma );
    f_bound = f_max ? ( f_value + gap ) : ( f_value - gap );
 
+   // the bound of this trial, and the one the tests use: with intFWBestLB
+   // the best found so far, which this trial may improve
+   const OFValue cert = gap;
+   if( f_use_best ) {
+    if( f_max ? ( f_bound < f_best_bound ) : ( f_bound > f_best_bound ) )
+     f_best_bound = f_bound;
+    f_bound = f_best_bound;
+    gap = f_max ? ( f_best_bound - f_value ) : ( f_value - f_best_bound );
+    }
+
    if( ( f_accept <= 0 ) || ( p_dir == & f_grad ) || small_gap( gap ) )
     break;
 
@@ -1893,7 +2044,13 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
     break;
     }
 
+   // refused: corrected once, if intFWOnReject asks for it and the direction
+   // still decreases the function, else the gradient
    ++f_n_rejected;
+   if( ( ! corrected ) && correct_direction( dec , cert ) ) {
+    corrected = true;
+    continue;
+    }
    p_dir = & f_grad;
    f_sigma = 0;
    }
@@ -2070,6 +2227,7 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   OFValue mx_sum , mv_sum , gx , cost_x , fw_gap , away_gap , La_a;
   Index a_idx;
   double lambda_a;
+  bool corrected = false;
   for( ; ; ) {
    scatter();
    mx_sum = eval_modified_objective();           // <grad F, x>
@@ -2150,6 +2308,16 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
    away_gap = f_max ? ( cost_x - La_a )   : ( La_a - cost_x );
    f_bound = f_max ? ( f_value + fw_gap ) : ( f_value - fw_gap );
 
+   // the bound of this trial, and the one the tests use: with intFWBestLB
+   // the best found so far, which this trial may improve
+   const OFValue cert = fw_gap;
+   if( f_use_best ) {
+    if( f_max ? ( f_bound < f_best_bound ) : ( f_bound > f_best_bound ) )
+     f_best_bound = f_bound;
+    f_bound = f_best_bound;
+    fw_gap = f_max ? ( f_best_bound - f_value ) : ( f_value - f_best_bound );
+    }
+
    if( ( f_accept <= 0 ) || ( p_dir == & f_grad ) || small_gap( fw_gap ) )
     break;
 
@@ -2160,7 +2328,13 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
     break;
     }
 
+   // refused: corrected once, if intFWOnReject asks for it and the direction
+   // still decreases the function, else the gradient
    ++f_n_rejected;
+   if( ( ! corrected ) && correct_direction( dec , cert ) ) {
+    corrected = true;
+    continue;
+    }
    p_dir = & f_grad;
    f_sigma = 0;
    }

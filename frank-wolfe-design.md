@@ -394,6 +394,19 @@ itself, and with the default `η = 0` the direction is always taken, as
 before. In the active-set variants the test concerns the vertex only, the
 atom to take weight away from being chosen with the gradient anyway.
 
+Three refinements of the same paper are there as well. `eDirAggregate` keeps
+as second piece of the closed-form master the aggregate of all the older
+ones, i.e. the combination the previous master has chosen, which needs the
+test: a direction that does not decrease the function gives a null step,
+after which the aggregate and its error shrink by the same factor and the
+master gives the same direction again. `intFWOnReject = eRejCorrect` replaces
+a refused direction that still decreases the function with the combination
+`(1 − λ) g + λ z`, `λ = (1 − η) G / (η (U − G))`, whose step passes the test,
+at the cost of the same one further oracle call. `intFWBestLB = 1` makes the
+test and the stop use `U' = f(x) − f_lb`, `f_lb` the best lower bound of the
+`compute()`. The pieces of the bundle directions are dropped at the start of
+every `compute()`, since a Modification may have made them invalid.
+
 ---
 
 ## 5. LMO via the children's solvers + parallelism

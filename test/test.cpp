@@ -18,7 +18,9 @@
  * gradient or from the two-piece bundle (intFWDirection), has to find that
  * value, and the bound it reports has to hold on both sides of it, also
  * when the step of the bundle direction has to pass the test of
- * dblFWAccept, with an eta of 0.5 and with one of 0.99. A last case changes
+ * dblFWAccept, with an eta of 0.5 and with one of 0.99, and with the
+ * aggregate piece in place of the previous gradient, the correction of a
+ * refused direction and the best bound found so far. A last case changes
  * the costs of a sub-Block and solves again, which is what a Solver
  * attached to a Block has to survive.
  *
@@ -181,6 +183,8 @@ struct Case {
  std::string name;
  int algorithm , cvx_comb , direction;
  double accept = 0;       // dblFWAccept, 0 taking every direction
+ int on_reject = 0;       // intFWOnReject, 1 correcting a refused direction
+ int best = 0;            // intFWBestLB, 1 testing against the best bound
  };
 
 void set_par( Solver * s , const std::string & name , int value )
@@ -500,6 +504,15 @@ bool check_fixed_step( void )
   }
  report( fw->get_dbl_par( fw->dbl_par_str2idx( "dblFWAccept" ) ) == 0.25 ,
          "dblFWAccept read back after the refusals" );
+ // the integer parameters of the bundle directions refuse what is out
+ for( auto [ name , bad ] : std::vector< std::pair< std::string , int > >{
+       { "intFWDirection" , 4 } , { "intFWDirection" , -1 } ,
+       { "intFWOnReject" , 2 } , { "intFWBestLB" , 2 } } ) {
+  threw = false;
+  try { set_par( fw , name , bad ); }
+  catch( std::invalid_argument & ) { threw = true; }
+  report( threw , name + " " + std::to_string( bad ) + " is refused" );
+  }
  set_par( fw , "dblFWAccept" , 0.0 );
  set_par( fw , "intAlgorithm" , 1 );
  threw = false;
@@ -690,6 +703,18 @@ int main( void )
   { "BPCG, bundle, eta 0.5" ,           2 , 1 , 1 , 0.5 } ,
   { "Away-step, bundle, eta 0.99" ,     1 , 1 , 1 , 0.99 } ,
   { "vanilla, gradient, eta 0.5" ,      0 , 1 , 0 , 0.5 } ,
+  // the aggregate piece in place of the previous gradient, with the least
+  // test, which refuses only the directions that do not decrease the
+  // function (without it the method may stall, see eDirAggregate), and with
+  // a larger one; the correction of a refused direction and the best bound,
+  // each alone and together, also with an eta close to 1
+  { "vanilla, aggregate, eta 1e-6" ,    0 , 1 , 3 , 1e-6 } ,
+  { "vanilla, aggregate, eta 0.5" ,     0 , 1 , 3 , 0.5 } ,
+  { "vanilla, bundle, corrected" ,      0 , 1 , 1 , 0.5 , 1 } ,
+  { "vanilla, bundle, best bound" ,     0 , 1 , 1 , 0.5 , 0 , 1 } ,
+  { "vanilla, aggregate, both" ,        0 , 1 , 3 , 0.99 , 1 , 1 } ,
+  { "BPCG, bundle, corrected" ,         2 , 1 , 1 , 0.99 , 1 } ,
+  { "Away-step, aggregate, both" ,      1 , 1 , 3 , 0.5 , 1 , 1 } ,
   { "BPCG, objective at x" ,            2 , 0 , 0 } };
 
  bool all = true;
@@ -704,6 +729,8 @@ int main( void )
   set_par( fw , "intCvxComb" , c.cvx_comb );
   set_par( fw , "intFWDirection" , c.direction );
   set_par( fw , "dblFWAccept" , c.accept );
+  set_par( fw , "intFWOnReject" , c.on_reject );
+  set_par( fw , "intFWBestLB" , c.best );
   set_par( fw , "intMaxIter" , 200000 );
   set_par( fw , "dblRelAcc" , 1e-10 );
 

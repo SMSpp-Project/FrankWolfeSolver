@@ -113,7 +113,12 @@
  * optimum, which is what gives the \f$ O( 1 / k ) \f$ rate of the
  * by-the-book method to the bundle directions too (the single-shot bundle
  * Frank-Wolfe method of Iommazzo, Rinaldi and Frangioni). The test costs
- * nothing when it passes and one call to the oracle when it fails.
+ * nothing when it passes and one call to the oracle when it fails. When the
+ * refused direction still decreases the function, intFWOnReject can replace
+ * it with the combination of it and of the gradient that the test is known
+ * to pass, at the same cost; and intFWBestLB makes the test, and the stop,
+ * use the best lower bound on the optimum found so far in place of the one
+ * of the iteration, which accepts at least the same directions.
  *
  * See FrankWolfeSolver/frank-wolfe-design.md for the full design.
  *
@@ -281,7 +286,14 @@ class FrankWolfeSolver : public CDASolver
  enum direction_type {
   eDirGradient = 0 ,  ///< the gradient at the current iterate
   eDirBundle   = 1 ,  ///< the master of two pieces, solved in closed form
-  eDirBundleMP = 2    ///< the master of a bundle, a MasterProblemBlock
+  eDirBundleMP = 2 ,  ///< the master of a bundle, a MasterProblemBlock
+  eDirAggregate = 3   ///< the current piece and the aggregate of the older
+  };
+
+ /// what a refused bundle direction is replaced by (value of intFWOnReject)
+ enum reject_type {
+  eRejGradient = 0 ,  ///< the gradient, i.e. the by-the-book step
+  eRejCorrect  = 1    ///< the combination of the two that passes the test
   };
 
 /*--------------------------------------------------------------------------*/
@@ -444,7 +456,24 @@ class FrankWolfeSolver : public CDASolver
    *   direction is then a convex combination of the two, hence an approximate
    *   subgradient of the linking function at the current iterate, and the
    *   weight of the older one grows with dblFWt. eDirGradient is the special
-   *   case in which that weight is 0, which is what dblFWt = 0 gives.
+   *   case in which that weight is 0, which is what dblFWt = 0 gives;
+   *
+   * - eDirBundleMP: the same master problem built out of a bundle of
+   *   intFWBundleSize pieces, kept and solved by a MasterProblemBlock whose
+   *   Solver strFWMPBCfg gives;
+   *
+   * - eDirAggregate: the same master problem of two pieces solved in closed
+   *   form, the older piece being not the gradient of the previous iterate
+   *   but the aggregate of all the older ones, i.e. the combination of them
+   *   that the master of the previous iteration has chosen, which takes the
+   *   place of the bundle it summarizes. Since a convex combination of
+   *   linearizations of a convex function is still below it, the aggregate
+   *   is a valid piece, and it carries the information of the whole history
+   *   in a vector and a constant. It needs the test of dblFWAccept, however
+   *   small: a direction that does not decrease the function gives a null
+   *   step, after which the aggregate and its error shrink by the same
+   *   factor and the master chooses the same direction again, so that
+   *   without the test the method may stay at the same iterate for good.
    *
    * The information the second mode uses is the one the method has already
    * paid for: no evaluation is added [see the file documentation for where
@@ -467,6 +496,29 @@ class FrankWolfeSolver : public CDASolver
    * the feasible region, e.g., an interior one found beforehand; it is only
    * available with AlgVanilla, the active-set variants starting from a
    * vertex. A warm start [see intHandleMod] takes precedence over both. */
+
+  intFWOnReject ,
+  ///< what a bundle direction refused by dblFWAccept is replaced by
+  /**< One of the reject_type values. With eRejGradient (default) the oracle
+   * is asked again with the gradient, i.e. the step is the by-the-book one.
+   * With eRejCorrect, when the refused direction z still decreases the
+   * function (0 < G < eta U, G being the decrease the gradient g promises
+   * towards its vertex and U the bound it gives), the oracle is asked with
+   * the combination ( 1 - lambda ) g + lambda z instead, lambda = ( 1 - eta )
+   * G / ( eta ( U - G ) ), whose step is known to pass the test; when it
+   * does not decrease the function, the gradient is taken as in the first
+   * case. Either way the cost is one more call to the oracle, and no further
+   * master problem. Has no effect when dblFWAccept is 0. */
+
+  intFWBestLB ,
+  ///< whether the best bound found so far replaces the one of the iteration
+  /**< With 0 (default) the stopping test and the test of dblFWAccept use the
+   * bound U the direction of the current iteration gives. With 1 they use
+   * U' = f( x ) - f_lb, f_lb being the best lower bound on the optimum found
+   * so far in this compute(), i.e. the largest f( x_k ) - U_k (the smallest
+   * upper bound, for a maximization): U' <= U, so that the test accepts at
+   * least the directions it accepted before and the method may stop sooner,
+   * and get_lb() reports f_lb. */
 
   intLastParFWSlv  ///< first allowed parameter value for derived classes
   };
@@ -835,6 +887,27 @@ class FrankWolfeSolver : public CDASolver
  void master_direction( OFValue fx );
 
 /*--------------------------------------------------------------------------*/
+ /// the same direction, out of the current piece and the aggregate one
+ /** Solves in closed form the master problem of the gradient at the current
+  * iterate and of the aggregate piece [see eDirAggregate], whose error at the
+  * iterate is computed from its vector and constant, then replaces the
+  * aggregate with the combination just chosen, which is the one the next
+  * iteration starts from. */
+
+ void aggregate_direction( OFValue fx );
+
+/*--------------------------------------------------------------------------*/
+ /// replaces a refused direction with one that passes the test, if it can
+ /** Under intFWOnReject == eRejCorrect, given the decrease dec the gradient
+  * promises towards the vertex of the refused direction and the bound cert
+  * that direction gives, with 0 < dec < cert, makes the direction the
+  * combination of it and of the gradient whose step passes the test of
+  * dblFWAccept, and returns true; returns false, and changes nothing,
+  * otherwise [see intFWOnReject]. */
+
+ bool correct_direction( OFValue dec , OFValue cert );
+
+/*--------------------------------------------------------------------------*/
  /// builds the MasterProblemBlock of eDirBundleMP, once
 
  void build_master( void );
@@ -919,6 +992,9 @@ class FrankWolfeSolver : public CDASolver
  int f_init_point;     ///< intInitPoint, where the iterates start from
  double f_step;        ///< dblFWStep, the step of LSFixed
  double f_accept;      ///< dblFWAccept, the eta of the test of a direction
+ int f_on_reject;      ///< intFWOnReject, what a refused direction becomes
+ int f_use_best;       ///< intFWBestLB, whether the best bound is used
+ OFValue f_best_bound; ///< the best bound of this compute() [see intFWBestLB]
 
  MasterProblemBlock * f_mpb = nullptr;
  ///< the master problem of eDirBundleMP, built once and kept
@@ -942,6 +1018,7 @@ class FrankWolfeSolver : public CDASolver
  OFValue f_last_gap = 0;   ///< final Frank-Wolfe gap of the last compute()
  Index f_n_accepted = 0;   ///< bundle directions taken in the last compute()
  Index f_n_rejected = 0;   ///< bundle directions refused in the last compute()
+ Index f_n_corrected = 0;  ///< refused directions corrected [intFWOnReject]
 
  // problem structure - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
@@ -972,6 +1049,9 @@ class FrankWolfeSolver : public CDASolver
  std::vector< Function::FunctionValue > f_pgrad;  ///< gradient of the previous
  std::vector< Function::FunctionValue > f_pxval;  ///< iterate it was taken at
  OFValue f_pval = 0;                              ///< value of the function there
+
+ std::vector< Function::FunctionValue > f_agg;    ///< the aggregate piece
+ OFValue f_agg_b = 0;  ///< its constant: the piece is f_agg_b + < f_agg , x >
  std::vector< Function::FunctionValue > f_xval;  ///< father active-var values at x
  std::vector< Function::FunctionValue > f_vval;  ///< father active-var values at v
 

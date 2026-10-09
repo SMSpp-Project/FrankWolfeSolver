@@ -17,7 +17,9 @@ optimal value, and the lower and upper bounds it reports have to hold on the
 two sides of it. The bundle direction is also run with the test of its steps
 (`dblFWAccept`), with an `η` of 0.5 and with one of 0.99, and with an `η`
 under the gradient, where it has to change nothing; the values out of `[0, 1)`
-have to be refused. The last run then changes the
+have to be refused. The same holds with the aggregate piece of
+`eDirAggregate`, with the correction of a refused direction (`intFWOnReject`)
+and with the best bound found so far (`intFWBestLB`), alone and together. The last run then changes the
 costs of a sub-`Block` and solves again.
 
 The exit code is 0 when every check passes, printing `All tests passed!!`, and

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `intFWDirection` `eDirAggregate`: the master problem of two pieces solved
+  in closed form, the older piece being the aggregate of all the previous
+  ones (the combination the master of the previous iteration has chosen)
+  instead of the gradient of the previous iterate; it needs `dblFWAccept`,
+  however small, since without it a direction that does not decrease the
+  function makes the method stall at the same iterate
+
+- `intFWOnReject`: a bundle direction refused by `dblFWAccept` that still
+  decreases the function can be replaced by the combination of it and of the
+  gradient whose step is known to pass the test, at the cost of the one more
+  call to the oracle that going back to the gradient costs
+
+- `intFWBestLB`: the test of `dblFWAccept` and the stopping test can use the
+  best lower bound on the optimum found so far in the `compute()`, which is
+  what `get_lb()` then reports
+
 - `dblFWAccept`, the test a step towards the vertex of a bundle direction
   (`eDirBundle`, `eDirBundleMP`) has to pass: the decrease the gradient
   promises along it has to be at least that fraction of the bound the
@@ -84,6 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 ### Fixed
+
+- the pieces of the bundle directions kept from a previous `compute()` are
+  dropped at the start of the next one: a Modification of the father may
+  have made them no longer linearizations below the linking function, and
+  the direction and the bound built out of them would not have been valid
 
 - `compute()` that throws before it starts, on parameters that do not go
   together or on an oracle that is not there, leaves the `Solver` and the
