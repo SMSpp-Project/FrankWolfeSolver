@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `dblFWAccept`, the test a step towards the vertex of a bundle direction
+  (`eDirBundle`, `eDirBundleMP`) has to pass: the decrease the gradient
+  promises along it has to be at least that fraction of the bound the
+  direction gives, or else the oracle is asked again with the gradient in
+  the same iteration, which gives the bundle directions the `O(1/k)` rate of
+  the classical method; the default 0 makes no test, and the final log
+  reports how many directions were taken and how many refused
+
 - `IntegralityBarrierFunction`, a `C05Function` built out of a `Block` of a
   (mixed-)integer linear program: the sum over the integer variables of an
   integrality penalty divided by the product of the normalised slacks of

@@ -100,6 +100,21 @@
  * and \f$ z_*^k = \bar{g}^k + \bar{\theta}^{k-1} d \f$. Neither piece
  * costs an evaluation: both are information the method has already paid for.
  *
+ * Whatever the direction, the vertex \f$ w^k \f$ the oracle returns for
+ * \f$ z_*^k \f$ gives the bound
+ * \f$ f( \bar{x}^k ) - f_* \leq U^k = z_*^k ( \bar{x}^k - w^k )
+ *      + \alpha_*^k \f$, but the step towards \f$ w^k \f$ need not
+ * decrease \f$ f \f$ as much as \f$ U^k \f$ promises, nor at all. With
+ * dblFWAccept \f$ = \eta \in ( 0 , 1 ) \f$ the step is taken only if
+ * \f[ \bar{g}^k ( \bar{x}^k - w^k ) \geq \eta \, U^k \f]
+ * and otherwise the oracle is asked again in the same iteration, with the
+ * gradient, whose vertex the step is then taken towards. Every step then
+ * keeps a fraction \f$ \eta \f$ of a bound on the distance from the
+ * optimum, which is what gives the \f$ O( 1 / k ) \f$ rate of the
+ * by-the-book method to the bundle directions too (the single-shot bundle
+ * Frank-Wolfe method of Iommazzo, Rinaldi and Frangioni). The test costs
+ * nothing when it passes and one call to the oracle when it fails.
+ *
  * See FrankWolfeSolver/frank-wolfe-design.md for the full design.
  *
  * \author Antonio Frangioni \n
@@ -481,6 +496,16 @@ class FrankWolfeSolver : public CDASolver
   ///< the step of intLineSearch == LSFixed
   /**< The step gamma in ( 0 , 1 ] that intLineSearch == LSFixed takes at
    * every iteration. Default 0.75. */
+
+  dblFWAccept ,
+  ///< the fraction of the bound a step of a bundle direction has to keep
+  /**< The eta in [ 0 , 1 ) of the test a step towards the vertex of a
+   * direction other than the gradient has to pass: the decrease the
+   * gradient promises along it has to be at least eta times the bound the
+   * direction gives, or else the oracle is asked again with the gradient in
+   * the same iteration [see the class documentation]. With 0 the test is
+   * not made and the direction is always taken. It has no effect under
+   * eDirGradient. Default 0. */
 
   dblLastParFWSlv  ///< first allowed parameter value for derived classes
   };
@@ -893,6 +918,7 @@ class FrankWolfeSolver : public CDASolver
  int f_bundle_size;    ///< intFWBundleSize, how many pieces the master keeps
  int f_init_point;     ///< intInitPoint, where the iterates start from
  double f_step;        ///< dblFWStep, the step of LSFixed
+ double f_accept;      ///< dblFWAccept, the eta of the test of a direction
 
  MasterProblemBlock * f_mpb = nullptr;
  ///< the master problem of eDirBundleMP, built once and kept
@@ -914,6 +940,8 @@ class FrankWolfeSolver : public CDASolver
  // statistics of the last compute(), for the final-summary log (intLogVerb 1)
  Index f_niter = 0;        ///< iterations performed by the last compute()
  OFValue f_last_gap = 0;   ///< final Frank-Wolfe gap of the last compute()
+ Index f_n_accepted = 0;   ///< bundle directions taken in the last compute()
+ Index f_n_rejected = 0;   ///< bundle directions refused in the last compute()
 
  // problem structure - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 

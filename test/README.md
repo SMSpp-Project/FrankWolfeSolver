@@ -14,8 +14,11 @@ Every algorithm (vanilla, Away-step, Blended Pairwise) is run under both
 bookkeeping modes (`intCvxComb`) and with the direction taken from the gradient
 and from the two-piece bundle (`intFWDirection`); each run has to find the
 optimal value, and the lower and upper bounds it reports have to hold on the
-two sides of it. The last run then changes the costs of a sub-`Block` and
-solves again.
+two sides of it. The bundle direction is also run with the test of its steps
+(`dblFWAccept`), with an `η` of 0.5 and with one of 0.99, and with an `η`
+under the gradient, where it has to change nothing; the values out of `[0, 1)`
+have to be refused. The last run then changes the
+costs of a sub-`Block` and solves again.
 
 The exit code is 0 when every check passes, printing `All tests passed!!`, and
 1 otherwise. The `makefile` builds the executable including the

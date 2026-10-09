@@ -80,7 +80,8 @@ static const std::vector< std::string > FWSlv_str_pars_str = { "strFWMPBCfg" };
 /*--------------------------------------------------------------------------*/
 
 static const std::vector< std::string > FWSlv_dbl_pars_str = { "dblFWt" ,
-								  "dblFWStep" };
+								  "dblFWStep" ,
+								  "dblFWAccept" };
 
 /*--------------------------------------------------------------------------*/
 /*---------------------------- AUXILIARY ROUTINES --------------------------*/
@@ -102,6 +103,7 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_bundle_size = get_dflt_int_par( intFWBundleSize );
  f_init_point  = get_dflt_int_par( intInitPoint );
  f_step        = get_dflt_dbl_par( dblFWStep );
+ f_accept      = get_dflt_dbl_par( dblFWAccept );
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
  f_max_time    = get_dflt_dbl_par( dblMaxTime );
@@ -706,6 +708,12 @@ void FrankWolfeSolver::set_par( idx_type par , double value )
                                   "must be in ( 0 , 1 ]" ) );
    f_step = value;
    return;
+  case( dblFWAccept ):
+   if( ! ( ( value >= 0 ) && ( value < 1 ) ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: dblFWAccept "
+                                  "must be in [ 0 , 1 )" ) );
+   f_accept = value;
+   return;
   default:             CDASolver::set_par( par , value );
   }
  }
@@ -763,6 +771,7 @@ double FrankWolfeSolver::get_dbl_par( idx_type par ) const
   case( dblEveryTTm ): return( f_every_t );
   case( dblFWt ):      return( f_t );
   case( dblFWStep ):   return( f_step );
+  case( dblFWAccept ): return( f_accept );
   default:             return( CDASolver::get_dbl_par( par ) );
   }
  }
@@ -819,6 +828,8 @@ double FrankWolfeSolver::get_dflt_dbl_par( idx_type par ) const
   return( 1 );
  if( par == dblFWStep )
   return( 0.75 );
+ if( par == dblFWAccept )
+  return( 0 );
 
  return( CDASolver::get_dflt_dbl_par( par ) );
  }
@@ -1566,6 +1577,8 @@ int FrankWolfeSolver::compute( bool changedvars )
    }
   } guard{ this };
 
+ f_n_accepted = f_n_rejected = 0;
+
  int status;
  try {
   open_father_channel();
@@ -1602,6 +1615,9 @@ int FrankWolfeSolver::compute( bool changedvars )
          << ", gap " << f_last_gap << ", status " << status;
   if( f_algorithm != AlgVanilla )
    *f_log << ", |A| " << f_aset.size();
+  if( f_n_accepted + f_n_rejected )
+   *f_log << ", directions " << f_n_accepted << " taken and "
+          << f_n_rejected << " refused";
   *f_log << std::endl;
   }
 
@@ -1709,6 +1725,12 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   return( std::chrono::duration< double >(
            std::chrono::steady_clock::now() - t_start ).count() ); };
 
+ // whether a gap is small enough to stop, against dblRelAcc and dblAbsAcc
+ auto small_gap = [ this ]( OFValue gap ) {
+  return( ( gap <= f_rel_acc * std::max( OFValue( 1 ) ,
+                                         std::abs( f_value ) ) ) ||
+          ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ); };
+
  const Index G = Index( f_grad.size() );
 
  // <grad f_father(x), val> over the father active variables
@@ -1803,55 +1825,81 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   OFValue father_val = f_fun->get_value();
   capture_father_values( f_xval );
   bundle_direction( father_val );
-  scatter();
 
-  OFValue mx_sum = eval_modified_objective();   // sum_j M_j(x_j)
+  /* The oracle is asked with the direction, and asked again with the
+   * gradient if the step towards the vertex it gives does not keep the
+   * fraction dblFWAccept of the bound the direction gives, unless that bound
+   * is already small enough to stop [see the class documentation]. */
 
-  run_LMOs( true );
+  OFValue mx_sum , mv_sum , cv , gx , cost_x , gap;
+  for( ; ; ) {
+   scatter();
+   mx_sum = eval_modified_objective();           // sum_j M_j(x_j)
+
+   run_LMOs( true );
+   if( f_lmo_infeas )
+    break;
+   mv_sum = 0;
+   for( auto & d : v_sb )
+    mv_sum += d.value;                            // sum_j M_j(v_j)
+   capture_father_values( f_vval );
+
+   gx = grad_dot( f_xval );               // <grad f_father(x), x>
+   cv = mv_sum - dir_dot( f_vval );       // sum_j h_j(v_j)
+
+   // the two quantities as the oracle has them, i.e. priced with the
+   // direction it was given: these are what the bound is built out of [see
+   // below], while the value and the line search want the gradient
+   const OFValue dx = dir_dot( f_xval );
+   const OFValue mv_dir = mv_sum;                 // min over X of <z*,.> + h
+   const OFValue mx_dir = mx_sum;                 // <z*,x> + h(x)
+
+   // what the value and the line search need is the vertex priced with the
+   // gradient, whatever the oracle has been given to find it
+   mv_sum = cv + grad_dot( f_vval );
+   if( ! cvx )
+    mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
+
+   // cost_x = <grad f_father, x> + ( sub-Block cost at x ): in (P2) the latter
+   // is the tracked convex combination cbar; in (P1) it is re-evaluated, i.e.
+   // mx_sum - gx, so cost_x = mx_sum. Everything (value, gap, line search) is
+   // then identical to the linear case with mx_sum replaced by cost_x.
+   cost_x = cvx ? ( gx + cbar ) : mx_sum;
+
+   f_value = father_val + ( cost_x - gx );
+
+   /* The bound, whatever direction the oracle has been given. z* is a
+    * sigma*-subgradient of the linking function at the current iterate, i.e.
+    *
+    *   f( y ) >= f( x ) + < z* , y - x > - sigma*   for every y ,
+    *
+    * so minimizing < z* , . > over the feasible set bounds the optimum from
+    * below once < z* , x > and sigma* are put in, and the quantity below is
+    * a valid gap. With the gradient it is the classical one, z* being the
+    * gradient and sigma* zero [see bundle_direction()]. */
+
+   OFValue cost_x_dir = cvx ? ( dx + cbar ) : mx_dir;
+   gap = f_max ? ( mv_dir - cost_x_dir + f_sigma )
+               : ( cost_x_dir - mv_dir + f_sigma );
+   f_bound = f_max ? ( f_value + gap ) : ( f_value - gap );
+
+   if( ( f_accept <= 0 ) || ( p_dir == & f_grad ) || small_gap( gap ) )
+    break;
+
+   // the decrease the gradient promises along the step towards the vertex
+   const OFValue dec = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+   if( dec >= f_accept * gap ) {
+    ++f_n_accepted;
+    break;
+    }
+
+   ++f_n_rejected;
+   p_dir = & f_grad;
+   f_sigma = 0;
+   }
+
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
-  OFValue mv_sum = 0;
-  for( auto & d : v_sb )
-   mv_sum += d.value;                            // sum_j M_j(v_j)
-  capture_father_values( f_vval );
 
-  OFValue gx = grad_dot( f_xval );               // <grad f_father(x), x>
-  OFValue cv = mv_sum - dir_dot( f_vval );       // sum_j h_j(v_j)
-
-  // the two quantities as the oracle has them, i.e. priced with the
-  // direction it was given: these are what the bound is built out of [see
-  // below], while the value and the line search want the gradient
-  const OFValue dx = dir_dot( f_xval );
-  const OFValue mv_dir = mv_sum;                 // min over X of <z*,.> + h
-  const OFValue mx_dir = mx_sum;                 // <z*,x> + h(x)
-
-  // what the value and the line search need is the vertex priced with the
-  // gradient, whatever the oracle has been given to find it
-  mv_sum = cv + grad_dot( f_vval );
-  if( ! cvx )
-   mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
-
-  // cost_x = <grad f_father, x> + ( sub-Block cost at x ): in (P2) the latter
-  // is the tracked convex combination cbar; in (P1) it is re-evaluated, i.e.
-  // mx_sum - gx, so cost_x = mx_sum. Everything (value, gap, line search) is
-  // then identical to the linear case with mx_sum replaced by cost_x.
-  OFValue cost_x = cvx ? ( gx + cbar ) : mx_sum;
-
-  f_value = father_val + ( cost_x - gx );
-
-  /* The bound, whatever direction the oracle has been given. z* is a
-   * sigma*-subgradient of the linking function at the current iterate, i.e.
-   *
-   *   f( y ) >= f( x ) + < z* , y - x > - sigma*   for every y ,
-   *
-   * so minimizing < z* , . > over the feasible set bounds the optimum from
-   * below once < z* , x > and sigma* are put in, and the quantity below is
-   * a valid gap. With the gradient it is the classical one, z* being the
-   * gradient and sigma* zero [see bundle_direction()]. */
-
-  OFValue cost_x_dir = cvx ? ( dx + cbar ) : mx_dir;
-  OFValue gap = f_max ? ( mv_dir - cost_x_dir + f_sigma )
-                      : ( cost_x_dir - mv_dir + f_sigma );
-  f_bound = f_max ? ( f_value + gap ) : ( f_value - gap );
   f_niter = t; f_last_gap = gap;             // for the final-summary log
 
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
@@ -1933,6 +1981,12 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   return( std::chrono::duration< double >(
            std::chrono::steady_clock::now() - t_start ).count() ); };
 
+ // whether a gap is small enough to stop, against dblRelAcc and dblAbsAcc
+ auto small_gap = [ this ]( OFValue gap ) {
+  return( ( gap <= f_rel_acc * std::max( OFValue( 1 ) ,
+                                         std::abs( f_value ) ) ) ||
+          ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ); };
+
  const Index G = Index( f_grad.size() );
  const double drop_eps = 1e-9;
 
@@ -2008,82 +2062,111 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   OFValue father_val = f_fun->get_value();
   capture_father_values( f_xval );
   bundle_direction( father_val );
-  scatter();
-  OFValue mx_sum = eval_modified_objective();    // <grad F, x>
 
-  // away vertex: the active-set atom a maximizing (minimizing, if eMax) the
-  // (modified) objective <grad F, a>, the "worst" atom we want to move weight
-  // away from. La_i = sum_j M_j(a_i) = <grad f_father(x), a_i> + c_i, where
-  // c_i = f_ci is the x-INDEPENDENT part sum_j[ alpha <c_j,a_ij> + beta q_j(a_ij) ]
-  // (the quadratic part included): so the cheap cached dot product is exact, not
-  // just for linear children, but also (i) for any *vertex* atom (where c_i is
-  // the cost at the vertex) and (ii) in eObjCvxComb (P2) mode, where the value
-  // model is itself cbar = sum_i lambda_i c_i, so the convex-combination cost of
-  // an *aggregate* atom is exactly its f_ci. Only the eObjAtX (P1) mode with
-  // quadratic children and aggregate atoms needs the atom written and re-evaluated
-  // at its (fractional) point; everything else uses the O(G) cached form.
-  const bool cached_argmax = all_lin || cvx;
-  Index a_idx = 0;
-  OFValue La_a = f_max ? Inf< OFValue >() : - Inf< OFValue >();
-  for( Index i = 0 ; i < f_aset.size() ; ++i ) {
-   OFValue La;
-   if( cached_argmax )
-    La = grad_dot( f_aset[ i ].f_val ) + f_aset[ i ].f_ci;
-   else {
-    f_aset[ i ].f_sol->write( f_Block );
-    La = eval_modified_objective();
+  // the oracle is asked with the direction, and asked again with the
+  // gradient if the step towards its vertex does not pass the test of
+  // dblFWAccept [see the same in the vanilla loop]; the away atom is chosen
+  // before each call, which writes the atoms into the Block
+  OFValue mx_sum , mv_sum , gx , cost_x , fw_gap , away_gap , La_a;
+  Index a_idx;
+  double lambda_a;
+  for( ; ; ) {
+   scatter();
+   mx_sum = eval_modified_objective();           // <grad F, x>
+
+   // away vertex: the active-set atom a maximizing (minimizing, if eMax) the
+   // (modified) objective <grad F, a>, the "worst" atom we want to move weight
+   // away from. La_i = sum_j M_j(a_i) = <grad f_father(x), a_i> + c_i, where
+   // c_i = f_ci is the x-INDEPENDENT part sum_j[ alpha <c_j,a_ij> + beta
+   // q_j(a_ij) ] (the quadratic part included): so the cheap cached dot
+   // product is exact, not just for linear children, but also (i) for any
+   // *vertex* atom (where c_i is the cost at the vertex) and (ii) in
+   // eObjCvxComb (P2) mode, where the value model is itself cbar = sum_i
+   // lambda_i c_i, so the convex-combination cost of an *aggregate* atom is
+   // exactly its f_ci. Only the eObjAtX (P1) mode with quadratic children and
+   // aggregate atoms needs the atom written and re-evaluated at its
+   // (fractional) point; everything else uses the O(G) cached form.
+   const bool cached_argmax = all_lin || cvx;
+   a_idx = 0;
+   La_a = f_max ? Inf< OFValue >() : - Inf< OFValue >();
+   for( Index i = 0 ; i < f_aset.size() ; ++i ) {
+    OFValue La;
+    if( cached_argmax )
+     La = grad_dot( f_aset[ i ].f_val ) + f_aset[ i ].f_ci;
+    else {
+     f_aset[ i ].f_sol->write( f_Block );
+     La = eval_modified_objective();
+     }
+    if( f_max ? ( La < La_a ) : ( La > La_a ) ) {
+     La_a = La;
+     a_idx = i;
+     }
     }
-   if( f_max ? ( La < La_a ) : ( La > La_a ) ) {
-    La_a = La;
-    a_idx = i;
+   lambda_a = f_aset[ a_idx ].f_weight;
+   a_val = f_aset[ a_idx ].f_val;   // away-atom father values (stored)
+
+   // FW vertex: the LMO of grad F
+   run_LMOs( true );
+   if( f_lmo_infeas )
+    break;
+   mv_sum = 0;
+   for( auto & d : v_sb )
+    mv_sum += d.value;                            // <grad F, v>
+   capture_father_values( f_vval );
+
+   // F(x) and the Frank-Wolfe gap (valid optimality bound). cost_x replaces
+   // mx_sum: in (P2) the sub-Block cost at x is the convex combination cbar of
+   // the atom costs ( cost_x = gx + cbar ); in (P1) it is mx_sum ( = gx + cost
+   // re-evaluated at x ). The two coincide for linear sub-Block objectives.
+   // the two quantities as the oracle has them, i.e. priced with the
+   // direction it was given: these are what the bound is built out of [see
+   // the same in the vanilla loop], while the value, the away atom and the
+   // line search want the gradient
+   const OFValue dx = dir_dot( f_xval );
+   const OFValue mv_dir = mv_sum;                 // min over X of <z*,.> + h
+   const OFValue mx_dir = mx_sum;                 // <z*,x> + h(x)
+
+   // whatever the oracle has been given to find the vertex, what the value
+   // and the line search need is the vertex priced with the gradient
+   mv_sum += grad_dot( f_vval ) - dir_dot( f_vval );
+   if( ! cvx )
+    mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
+
+   gx = grad_dot( f_xval );               // <grad f_father(x), x>
+   OFValue cbar = 0;
+   if( cvx )
+    for( const auto & el : f_aset )
+     cbar += el.f_weight * el.f_ci;               // sum_i lambda_i h(atom_i)
+   cost_x = cvx ? ( gx + cbar ) : mx_sum;
+
+   f_value = father_val + ( cost_x - gx );
+
+   // the bound out of z* and sigma*, whatever the direction [see the vanilla
+   // loop for why this is valid]; the away gap stays on the gradient, the
+   // atom to take weight away from being chosen with it
+   OFValue cost_x_dir = cvx ? ( dx + cbar ) : mx_dir;
+   fw_gap   = f_max ? ( mv_dir - cost_x_dir + f_sigma )
+                    : ( cost_x_dir - mv_dir + f_sigma );
+   away_gap = f_max ? ( cost_x - La_a )   : ( La_a - cost_x );
+   f_bound = f_max ? ( f_value + fw_gap ) : ( f_value - fw_gap );
+
+   if( ( f_accept <= 0 ) || ( p_dir == & f_grad ) || small_gap( fw_gap ) )
+    break;
+
+   // the decrease the gradient promises along the step towards the vertex
+   const OFValue dec = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+   if( dec >= f_accept * fw_gap ) {
+    ++f_n_accepted;
+    break;
     }
+
+   ++f_n_rejected;
+   p_dir = & f_grad;
+   f_sigma = 0;
    }
-  double lambda_a = f_aset[ a_idx ].f_weight;
-  a_val = f_aset[ a_idx ].f_val;   // away-atom father values (stored)
 
-  // FW vertex: the LMO of grad F
-  run_LMOs( true );
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
-  OFValue mv_sum = 0;
-  for( auto & d : v_sb )
-   mv_sum += d.value;                            // <grad F, v>
-  capture_father_values( f_vval );
 
-  // F(x) and the Frank-Wolfe gap (valid optimality bound). cost_x replaces
-  // mx_sum: in (P2) the sub-Block cost at x is the convex combination cbar of
-  // the atom costs ( cost_x = gx + cbar ); in (P1) it is mx_sum ( = gx + cost
-  // re-evaluated at x ). The two coincide for linear sub-Block objectives.
-  // the two quantities as the oracle has them, i.e. priced with the
-  // direction it was given: these are what the bound is built out of [see
-  // the same in the vanilla loop], while the value, the away atom and the
-  // line search want the gradient
-  const OFValue dx = dir_dot( f_xval );
-  const OFValue mv_dir = mv_sum;                 // min over X of <z*,.> + h
-  const OFValue mx_dir = mx_sum;                 // <z*,x> + h(x)
-
-  // whatever the oracle has been given to find the vertex, what the value
-  // and the line search need is the vertex priced with the gradient
-  mv_sum += grad_dot( f_vval ) - dir_dot( f_vval );
-  if( ! cvx )
-   mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
-
-  OFValue gx = grad_dot( f_xval );               // <grad f_father(x), x>
-  OFValue cbar = 0;
-  if( cvx )
-   for( const auto & el : f_aset )
-    cbar += el.f_weight * el.f_ci;               // sum_i lambda_i h(atom_i)
-  OFValue cost_x = cvx ? ( gx + cbar ) : mx_sum;
-
-  f_value = father_val + ( cost_x - gx );
-
-  // the bound out of z* and sigma*, whatever the direction [see the vanilla
-  // loop for why this is valid]; the away gap stays on the gradient, the
-  // atom to take weight away from being chosen with it
-  OFValue cost_x_dir = cvx ? ( dx + cbar ) : mx_dir;
-  OFValue fw_gap   = f_max ? ( mv_dir - cost_x_dir + f_sigma )
-                           : ( cost_x_dir - mv_dir + f_sigma );
-  OFValue away_gap = f_max ? ( cost_x - La_a )   : ( La_a - cost_x );
-  f_bound = f_max ? ( f_value + fw_gap ) : ( f_value - fw_gap );
   f_niter = t; f_last_gap = fw_gap;          // for the final-summary log
 
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log

@@ -16,9 +16,11 @@
  * FrankWolfeSolver (vanilla, Away-step, Blended Pairwise), under both of its
  * bookkeeping modes (intCvxComb) and with the direction taken from the
  * gradient or from the two-piece bundle (intFWDirection), has to find that
- * value, and the bound it reports has to hold on both sides of it. A last
- * case changes the costs of a sub-Block and solves again, which is what a
- * Solver attached to a Block has to survive.
+ * value, and the bound it reports has to hold on both sides of it, also
+ * when the step of the bundle direction has to pass the test of
+ * dblFWAccept, with an eta of 0.5 and with one of 0.99. A last case changes
+ * the costs of a sub-Block and solves again, which is what a Solver
+ * attached to a Block has to survive.
  *
  * Two corners of the solver are in the instance on purpose: a coordinate
  * whose box is a single point, and a ColVariable of the father Objective that
@@ -178,6 +180,7 @@ AbstractBlock * build( std::vector< LinearFunction * > & costs ,
 struct Case {
  std::string name;
  int algorithm , cvx_comb , direction;
+ double accept = 0;       // dblFWAccept, 0 taking every direction
  };
 
 void set_par( Solver * s , const std::string & name , int value )
@@ -486,6 +489,18 @@ bool check_fixed_step( void )
  try { set_par( fw , "intInitPoint" , 2 ); }
  catch( std::invalid_argument & ) { threw = true; }
  report( threw , "intInitPoint 2 is refused" );
+ // dblFWAccept is a fraction in [ 0 , 1 ): 1 and what is out are refused,
+ // and what is refused leaves the value that was there
+ set_par( fw , "dblFWAccept" , 0.25 );
+ for( double bad : { 1.0 , -0.5 , 2.0 } ) {
+  threw = false;
+  try { set_par( fw , "dblFWAccept" , bad ); }
+  catch( std::invalid_argument & ) { threw = true; }
+  report( threw , "dblFWAccept " + std::to_string( bad ) + " is refused" );
+  }
+ report( fw->get_dbl_par( fw->dbl_par_str2idx( "dblFWAccept" ) ) == 0.25 ,
+         "dblFWAccept read back after the refusals" );
+ set_par( fw , "dblFWAccept" , 0.0 );
  set_par( fw , "intAlgorithm" , 1 );
  threw = false;
  try { fw->compute( false ); }
@@ -668,6 +683,13 @@ int main( void )
   { "BPCG, gradient" ,                  2 , 1 , 0 } ,
   { "BPCG, bundle direction" ,          2 , 1 , 1 } ,
   { "vanilla, objective at x" ,         0 , 0 , 0 } ,
+  // the test of the step of a bundle direction, with an eta of 0.5 and with
+  // one close to 1, and under the gradient, where it changes nothing
+  { "vanilla, bundle, eta 0.5" ,        0 , 1 , 1 , 0.5 } ,
+  { "vanilla, bundle, eta 0.99" ,       0 , 1 , 1 , 0.99 } ,
+  { "BPCG, bundle, eta 0.5" ,           2 , 1 , 1 , 0.5 } ,
+  { "Away-step, bundle, eta 0.99" ,     1 , 1 , 1 , 0.99 } ,
+  { "vanilla, gradient, eta 0.5" ,      0 , 1 , 0 , 0.5 } ,
   { "BPCG, objective at x" ,            2 , 0 , 0 } };
 
  bool all = true;
@@ -681,6 +703,7 @@ int main( void )
   set_par( fw , "intAlgorithm" , c.algorithm );
   set_par( fw , "intCvxComb" , c.cvx_comb );
   set_par( fw , "intFWDirection" , c.direction );
+  set_par( fw , "dblFWAccept" , c.accept );
   set_par( fw , "intMaxIter" , 200000 );
   set_par( fw , "dblRelAcc" , 1e-10 );
 
