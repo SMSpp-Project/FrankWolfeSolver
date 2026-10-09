@@ -34,6 +34,12 @@
  * the costs have to be the original ones and a new compute() has to find
  * the optimum.
  *
+ * A compute() that refuses to start, because of parameters that do not go
+ * together or of an oracle that is not there, has to leave the Solver and
+ * the father unlocked and still listening to the changes of the sub-Block,
+ * so that they can be locked again and a change of the costs made
+ * before the next compute() is seen by it.
+ *
  * The test needs nothing but the core, so that the CI of FrankWolfeSolver
  * builds this module alone.
  *
@@ -52,6 +58,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "AbstractBlock.h"
@@ -321,6 +328,86 @@ bool check_other_solver( void )
 
  father->unregister_Solver( other );
  delete other;
+ father->unregister_Solver( fw );
+ delete fw;
+ for( auto sb : father->get_nested_Blocks() ) {
+  auto s = sb->get_registered_solvers().front();
+  sb->unregister_Solver( s );
+  delete s;
+  }
+ delete father;
+ return( ok );
+ }
+
+/*--------------------------------------------------------------------------*/
+/// a compute() that throws before it starts leaves nothing locked behind
+
+bool check_refusals( void )
+{
+ bool ok = true;
+ auto report = [ & ]( bool cond , const std::string & what ) {
+  std::cout << std::left << std::setw( 60 ) << what
+            << ( cond ? "  OK" : "  KO" ) << std::endl;
+  ok &= cond;
+  };
+
+ std::vector< LinearFunction * > costs;
+ auto father = build( costs );
+ auto fw = Solver::new_Solver( "FrankWolfeSolver" );
+ father->register_Solver( fw );
+
+ set_par( fw , "intLMOObj" , 2 );
+ set_par( fw , "intAlgorithm" , 2 );
+ set_par( fw , "intCvxComb" , 1 );
+ set_par( fw , "intFWDirection" , 0 );
+ set_par( fw , "intMaxIter" , 200000 );
+ set_par( fw , "dblRelAcc" , 1e-10 );
+
+ // each refusal is tried with a change of the costs of the first sub-Block
+ // made after it, which the next compute() has to see
+ struct Refusal {
+  std::string name , par;
+  int bad , good;
+  };
+ const std::vector< Refusal > refusals = {
+  // eInitBlock goes with the vanilla algorithm only
+  { "intInitPoint eInitBlock with BPCG" , "intInitPoint" , 1 , 0 } ,
+  // the sub-Block have one Solver each, at index 0
+  { "intLMOSlvr past the Solver of the sub-Block" , "intLMOSlvr" , 3 , 0 } };
+
+ for( const auto & r : refusals ) {
+  set_par( fw , r.par , r.bad );
+  bool threw = false;
+  try {
+   fw->compute( false );
+   }
+  catch( std::exception & ) {
+   threw = true;
+   }
+  report( threw , r.name + ": compute() throws" );
+
+  // the mutex of the Solver is tried from another thread, being recursive
+  // and given to this one anyway; the father has no owner, a lock() from
+  // another owner waiting forever on one left behind
+  bool solver_free = false;
+  std::thread t( [ & ]() {
+   if( ( solver_free = fw->try_lock() ) )
+    fw->unlock();
+   } );
+  t.join();
+  report( solver_free , "  after it the Solver is not locked" );
+  report( father->is_owned_by( nullptr ) ,
+          "  after it the father is not locked" );
+
+  set_par( fw , r.par , r.good );
+  for( int i = 0 ; i < N ; ++i ) {
+   data[ i ].c = - data[ i ].c;
+   costs[ 0 ]->modify_coefficient( i , data[ i ].c );
+   }
+  ok &= check( fw , "  after it, costs changed" );
+  }
+
+ // the costs are the original ones again, the number of changes being even
  father->unregister_Solver( fw );
  delete fw;
  for( auto sb : father->get_nested_Blocks() ) {
@@ -629,6 +716,7 @@ int main( void )
   }
 
  all &= check_other_solver();
+ all &= check_refusals();
  all &= check_fixed_step();
  all &= check_barrier_function();
 

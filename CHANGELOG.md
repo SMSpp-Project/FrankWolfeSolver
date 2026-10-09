@@ -86,6 +86,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `compute()` that throws before it starts, on parameters that do not go
+  together or on an oracle that is not there, leaves the `Solver` and the
+  father unlocked and still listening to the sub-`Block`: the parameters are
+  checked before anything is locked, and what may throw after the locks
+  unlocks before the exception goes out
+
 - a Solver registered to the father next to `FrankWolfeSolver` (e.g., the
   `MILPSolver` of a battery, which solves the Block once and never again)
   received the Modification of every iteration, which rewrites the costs of

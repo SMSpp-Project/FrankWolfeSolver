@@ -1495,6 +1495,12 @@ int FrankWolfeSolver::compute( bool changedvars )
  if( ! f_Block )
   throw( std::logic_error( "FrankWolfeSolver::compute: no Block registered" ) );
 
+ // the parameters are checked before anything is locked, so that a refusal
+ // leaves the Solver and the Block as they were
+ if( ( f_init_point == eInitBlock ) && ( f_algorithm != AlgVanilla ) )
+  throw( std::invalid_argument( "FrankWolfeSolver::compute: intInitPoint "
+                                "eInitBlock needs intAlgorithm AlgVanilla" ) );
+
  // lock the Solver against concurrent compute() from other threads: every
  // Solver has an internal recursive mutex (see Solver::lock()). It is released
  // before every return below (and in the catch).
@@ -1508,21 +1514,30 @@ int FrankWolfeSolver::compute( bool changedvars )
   return( kBlockLocked );
   }
 
- // process any Modification arrived from the sub-Block since the last
- // compute() (lazily), possibly rebuilding the cached structure, *before*
- // acquiring the LMO (a structural change rebuilds v_sb)
- process_modifications();
+ // what follows may throw with the Solver and the Block locked: they are
+ // unlocked before the exception goes out
+ try {
+  // process any Modification arrived from the sub-Block since the last
+  // compute() (lazily), possibly rebuilding the cached structure, *before*
+  // acquiring the LMO (a structural change rebuilds v_sb)
+  process_modifications();
 
- acquire_LMOs();
+  acquire_LMOs();
 
- // LMOLinear requires purely linear sub-Block objectives (no quadratic term
- // to keep in the oracle); use LMOQuad/LMOFull otherwise
-
- if( f_lmo_obj == LMOLinear )
-  for( auto & d : v_sb )
-   if( d.dq )
-    throw( std::logic_error( "FrankWolfeSolver: LMOLinear requires "
-     "LinearFunction sub-Block objectives; use LMOQuad/LMOFull otherwise" ) );
+  // LMOLinear requires purely linear sub-Block objectives (no quadratic
+  // term to keep in the oracle); use LMOQuad/LMOFull otherwise
+  if( f_lmo_obj == LMOLinear )
+   for( auto & d : v_sb )
+    if( d.dq )
+     throw( std::logic_error( "FrankWolfeSolver: LMOLinear requires "
+      "LinearFunction sub-Block objectives; use LMOQuad/LMOFull otherwise" ) );
+  }
+ catch( ... ) {
+  if( ! owned )
+   f_Block->unlock( f_id );
+  unlock();
+  throw;
+  }
 
  // inhibit while running: the scatter() (and the final restore_objectives())
  // change the sub-Block objectives, which are "self-inflicted" Modification to
@@ -1550,10 +1565,6 @@ int FrankWolfeSolver::compute( bool changedvars )
    catch( ... ) {}
    }
   } guard{ this };
-
- if( ( f_init_point == eInitBlock ) && ( f_algorithm != AlgVanilla ) )
-  throw( std::invalid_argument( "FrankWolfeSolver::compute: intInitPoint "
-                                "eInitBlock needs intAlgorithm AlgVanilla" ) );
 
  int status;
  try {

@@ -28,7 +28,10 @@ endif ()
 
 # ----- FrankWolfeSolver_unit_test ------------------------------------------ #
 add_executable(${modName}_unit_test test.cpp)
-target_link_libraries(${modName}_unit_test PRIVATE SMS++::FrankWolfeSolver)
+# the test locks the Solver from a second thread
+find_package(Threads REQUIRED)
+target_link_libraries(${modName}_unit_test PRIVATE SMS++::FrankWolfeSolver
+                                                   Threads::Threads)
 
 if (WIN32 AND BUILD_SHARED_LIBS AND NOT DEFINED ENV{CONDA_BUILD})
     # On Windows with shared libraries enabled copies all runtime DLL
