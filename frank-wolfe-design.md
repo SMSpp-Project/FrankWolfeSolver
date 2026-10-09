@@ -363,6 +363,50 @@ master schemes (e.g. FISTA or others) may be tried on top of it. **This work is
 therefore suspended** until that QP solver is available — at which point wiring it
 in here is almost free.
 
+### 4.quater Directions other than the gradient: bundle Frank-Wolfe (done)
+
+With `intFWDirection` other than `eDirGradient` the oracle is not given the
+gradient `g` at the iterate `x` but the solution `z` of the dual of a
+proximal master problem built out of the gradients already computed, i.e. a
+convex combination of them whose weights minimize `α(θ) + (t/2) ||z(θ)||²`,
+`α(θ)` being the combination of their linearization errors at `x` and `t` the
+stabilization `dblFWt`: `eDirBundle` keeps the gradient at `x` and the one at
+the previous iterate and solves the master in closed form, `eDirBundleMP`
+keeps a bundle of `intFWBundleSize` pieces in a `MasterProblemBlock`. Since
+`z` is an `α`-subgradient of the father at `x`, the vertex `w` the oracle
+returns for it gives the bound `f(x) − f* ≤ U = <z, x − w> + α`, which is the
+gap the stopping test uses whatever the direction.
+
+The step towards `w`, however, need not decrease `f` as `U` promises, and
+need not decrease it at all; a direction that is always taken is outside of
+any convergence analysis, and the measures of September 2026 (ten pieces
+doing worse than two on `goto10_8_1`) were taken that way. `dblFWAccept = η ∈
+(0, 1)` adds the test of the single-shot bundle Frank-Wolfe method of
+Iommazzo, Rinaldi and Frangioni: the step is taken only if `<g, x − w> ≥ η U`,
+and otherwise the oracle is asked again in the same iteration with the
+gradient, whose vertex the step goes towards. Every step then keeps the
+fraction `η` of a bound on the distance from the optimum, which gives the
+`O(1/k)` rate of the classical method; the test costs nothing when it passes
+and one call to the oracle when it fails, and the final log reports how many
+directions were taken and how many refused. The test is not made when `U`
+is already small enough to stop, nor when the master has given the gradient
+itself, and with the default `η = 0` the direction is always taken, as
+before. In the active-set variants the test concerns the vertex only, the
+atom to take weight away from being chosen with the gradient anyway.
+
+Three refinements of the same paper are there as well. `eDirAggregate` keeps
+as second piece of the closed-form master the aggregate of all the older
+ones, i.e. the combination the previous master has chosen, which needs the
+test: a direction that does not decrease the function gives a null step,
+after which the aggregate and its error shrink by the same factor and the
+master gives the same direction again. `intFWOnReject = eRejCorrect` replaces
+a refused direction that still decreases the function with the combination
+`(1 − λ) g + λ z`, `λ = (1 − η) G / (η (U − G))`, whose step passes the test,
+at the cost of the same one further oracle call. `intFWBestLB = 1` makes the
+test and the stop use `U' = f(x) − f_lb`, `f_lb` the best lower bound of the
+`compute()`. The pieces of the bundle directions are dropped at the start of
+every `compute()`, since a Modification may have made them invalid.
+
 ---
 
 ## 5. LMO via the children's solvers + parallelism
@@ -654,7 +698,9 @@ not apply here).
   (auto/agnostic/exact), `intLMOSlvr` (index of the `:Solver` already registered
   to each child to be used as LMO, default 0). Plus the inherited `intMaxThread`
   (default 1), `intMaxIter`.
-- `dbl`: inherited `dblRelAcc`/`dblAbsAcc` (tolerance on the gap), `dblMaxTime`.
+- `dbl`: inherited `dblRelAcc`/`dblAbsAcc` (tolerance on the gap), `dblMaxTime`;
+  `dblFWt` (stabilization of the master of the bundle directions),
+  `dblFWStep` (step of `LSFixed`), `dblFWAccept` (the `η` of §4.quater).
 - v1.1: `intLMOSlvr` → **`vint_LMOSlvr`** (one index per LMO; a vector shorter
   than the number of LMOs → the rest at the default 0; an empty vector [default] →
   all at 0). Plus, à la LDS, `str`/`vstr`/`vint` for the per-child

@@ -41,7 +41,9 @@ kept exactly in its oracle. Three algorithmic variants are available
 Pairwise Conditional Gradient (the last two maintain an *active set* of atoms,
 optionally bounded by aggregation via `intMaxAtoms`); the line search
 (`intLineSearch`) is the exact one when the father objective is quadratic, the
-open-loop `2/(t+2)` rule otherwise.
+open-loop `2/(t+2)` rule otherwise, or a fixed step (`dblFWStep`), and the
+iterates start from a vertex of the oracle or from the current values of the
+`Variable` (`intInitPoint`).
 
 ## Two problems at no extra cost
 
@@ -68,11 +70,43 @@ convex-combination value is linear in the step, hence obtained for free. See the
 documentation of `intCvxComb` (and the GENERAL NOTES of the class) for the full
 discussion, and [frank-wolfe-design.md](frank-wolfe-design.md) for the design.
 
+## A heuristic for integer programs
+
+The module also has `IntegralityBarrierSolver`, which looks for a feasible
+solution of a (mixed-)integer linear program held in a `Block` (e.g., an
+`AbstractBlock` read out of an MPS file) by minimizing, with a
+`FrankWolfeSolver` whose oracle solves the linear relaxation, the
+`IntegralityBarrierFunction` of the `Block`: an integrality penalty, zero on
+the integer values, divided by the product of the normalised slacks of the
+rows in which each variable appears, each raised to an exponent `y_k`. The
+integer points stay global minima even on the boundary of the polyhedron,
+where the non-integer points are penalised most; between one run of
+Frank-Wolfe and the next the exponents change, those of the active rows with
+fractional variables going to 0, and each run stops as soon as rounding the
+iterate, or the vertex the oracle gives, is feasible.
+
 
 ## Getting started
 
 These instructions will let you build `FrankWolfeSolver`.
 
+
+The module also comes ready-made, in any of
+
+```sh
+sudo add-apt-repository ppa:smspp-project/smspp   # Ubuntu
+sudo apt install libsmspp-frankwolfe-dev
+
+conda install -c conda-forge smspp-project        # Linux, macOS, Windows
+
+brew tap SMSpp-Project/smspp                      # macOS, Linux
+brew install smspp
+
+vcpkg install "smspp[core,frankwolfe]"            # from the sources
+```
+
+where apt and the port give the module alone, while conda and the tap carry
+the whole framework. What follows is about building it yourself.
 
 ### Requirements
 
@@ -149,6 +183,9 @@ conduct, and the process for submitting merge requests to us.
   Dipartimento di Informatica  
   Università di Pisa
 
+- **Donato Meoli**  
+  Dipartimento di Informatica  
+  Università di Pisa
 
 ### Contributors
 

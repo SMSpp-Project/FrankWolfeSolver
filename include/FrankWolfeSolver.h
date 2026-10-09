@@ -26,13 +26,111 @@
  * stronger Dantzig-Wolfe / perspective-cut relaxation of it; see the GENERAL
  * NOTES of the class and the intCvxComb parameter.
  *
+ * The direction is the one the by-the-book method uses, i.e., the gradient of
+ * the linking function at the current iterate is what the LMO is given, which
+ * reduces the function to its first-order model and ignores every other piece
+ * of information about it. Formulae that instead pass the solution of a small
+ * stabilized master problem, built out of the first-order information already
+ * at hand and having the by-the-book choice as the special case in which one
+ * linearization alone is kept, are those of
+ *
+ *  A. Frangioni, F. Rinaldi "Bundle-inspired Direction Formulae for
+ *  Conditional Gradient Methods", draft
+ *
+ * Those formulae, in the notation of this solver, are the following. Write
+ * \f$ \bar{x}^k \f$ for the current iterate, \f$ \bar{g}^k =
+ * \nabla f( \bar{x}^k ) \f$ for the gradient of the linking function there,
+ * \f$ \bar{x}^{k-1} \f$ and \f$ \bar{g}^{k-1} \f$ for the same at the
+ * previous iterate, and \f$ x^k \f$ and \f$ g^k \f$ for the vertex the
+ * oracle has returned and the gradient there. The translated function
+ * \f[ h^k( d ) = f( \bar{x}^k + d ) - f( \bar{x}^k ) \f]
+ * has \f$ h^k( 0 ) = 0 \f$ and, by convexity, is bounded below by each of
+ * the three linear functions
+ * \f[ \bar{l}^k( d ) = \bar{g}^k d \quad , \quad
+ *     \bar{l}^{k-1}( d ) = \bar{g}^{k-1} d - \bar{\alpha}^{k-1} \quad ,
+ *     \quad l^k( d ) = g^k d - \alpha^k \f]
+ * whose constants are the linearization errors at the current iterate,
+ * \f[ \bar{\alpha}^{k-1} = f( \bar{x}^k ) - f( \bar{x}^{k-1} )
+ *      - \bar{g}^{k-1} ( \bar{x}^k - \bar{x}^{k-1} ) \quad , \quad
+ *     \alpha^k = f( \bar{x}^k ) - f( x^k ) - g^k ( \bar{x}^k - x^k ) \f]
+ * both non-negative, the first one being 0 for the gradient taken at the
+ * iterate itself. The by-the-book method keeps \f$ \bar{l}^k \f$ alone; the
+ * piecewise-linear model
+ * \f$ \check{h}^k( d ) = \max \{ \bar{l}^k( d ) , \bar{l}^{k-1}( d ) ,
+ * l^k( d ) \} \leq h^k( d ) \f$ uses all of them, and a stabilizing term
+ * makes it into the master problem
+ * \f[ \min \{ v + \frac{1}{2t} \| d \|^2 \; : \;
+ *     v \geq \bar{g}^k d \; , \;
+ *     v \geq \bar{g}^{k-1} d - \bar{\alpha}^{k-1} \; , \;
+ *     v \geq g^k d - \alpha^k \} \f]
+ * a convex quadratic program in the direction \f$ d \f$ and one further
+ * variable. Its dual is the problem of finding the convex multipliers
+ * \f$ \theta \f$ that minimize
+ * \f[ \bar{\alpha}^{k-1} \bar{\theta}^{k-1} + \alpha^k \theta^k
+ *     + \frac{t}{2} \| \bar{g}^{k-1} \bar{\theta}^{k-1} + g^k \theta^k
+ *     + \bar{g}^k \bar{\theta}^k \|^2 \f]
+ * and the two are tied by \f$ d_*^k = - t z_*^k \f$, with
+ * \f[ z_*^k = \bar{g}^{k-1} \bar{\theta}^{k-1} + g^k \theta^k
+ *             + \bar{g}^k \bar{\theta}^k \quad , \quad
+ *     \alpha_*^k = \bar{\alpha}^{k-1} \bar{\theta}^{k-1}
+ *                   + \alpha^k \theta^k \f]
+ * so that \f$ z_*^k \in \partial_{\alpha_*^k} f( \bar{x}^k ) \f$: what
+ * the oracle is given is an approximate subgradient of the linking function
+ * at the current iterate, and a positive multiple of a direction is the same
+ * direction for it. The by-the-book choice is the feasible special case
+ * \f$ \bar{\theta}^k = 1 \f$, i.e., \f$ z_*^k = \bar{g}^k \f$.
+ *
+ * The stabilization decides between the two ends: the larger \f$ t \f$ is,
+ * the more the norm weighs and the more the direction is the least-norm
+ * combination of the gradients at hand, whatever their linearization errors;
+ * the smaller it is, the more those errors matter, and as \f$ t \to 0 \f$
+ * the gradient is recovered. Since \f$ z_*^k \f$ is an approximate
+ * subgradient of the same kind as the pieces it combines, it can take their
+ * place in the model of the next iteration without changing the solution of
+ * the master, which is what allows keeping a bundle of any size and
+ * compressing it to one pair.
+ *
+ * Of this, intFWDirection == eDirBundle implements the two pieces
+ * \f$ ( \bar{g}^k , 0 ) \f$ and
+ * \f$ ( \bar{g}^{k-1} , \bar{\alpha}^{k-1} ) \f$, for which the master
+ * is solved in closed form: with \f$ d = \bar{g}^{k-1} - \bar{g}^k \f$,
+ * \f[ \bar{\theta}^{k-1} = \min \{ 1 , \max \{ 0 ,
+ *      - ( t \, \bar{g}^k d + \bar{\alpha}^{k-1} ) /
+ *        ( t \| d \|^2 ) \} \} \f]
+ * and \f$ z_*^k = \bar{g}^k + \bar{\theta}^{k-1} d \f$. Neither piece
+ * costs an evaluation: both are information the method has already paid for.
+ *
+ * Whatever the direction, the vertex \f$ w^k \f$ the oracle returns for
+ * \f$ z_*^k \f$ gives the bound
+ * \f$ f( \bar{x}^k ) - f_* \leq U^k = z_*^k ( \bar{x}^k - w^k )
+ *      + \alpha_*^k \f$, but the step towards \f$ w^k \f$ need not
+ * decrease \f$ f \f$ as much as \f$ U^k \f$ promises, nor at all. With
+ * dblFWAccept \f$ = \eta \in ( 0 , 1 ) \f$ the step is taken only if
+ * \f[ \bar{g}^k ( \bar{x}^k - w^k ) \geq \eta \, U^k \f]
+ * and otherwise the oracle is asked again in the same iteration, with the
+ * gradient, whose vertex the step is then taken towards. Every step then
+ * keeps a fraction \f$ \eta \f$ of a bound on the distance from the
+ * optimum, which is what gives the \f$ O( 1 / k ) \f$ rate of the
+ * by-the-book method to the bundle directions too (the single-shot bundle
+ * Frank-Wolfe method of Iommazzo, Rinaldi and Frangioni). The test costs
+ * nothing when it passes and one call to the oracle when it fails. When the
+ * refused direction still decreases the function, intFWOnReject can replace
+ * it with the combination of it and of the gradient that the test is known
+ * to pass, at the same cost; and intFWBestLB makes the test, and the stop,
+ * use the best lower bound on the optimum found so far in place of the one
+ * of the iteration, which accepts at least the same directions.
+ *
  * See FrankWolfeSolver/frank-wolfe-design.md for the full design.
  *
  * \author Antonio Frangioni \n
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \copyright &copy; by Antonio Frangioni
+ * \author Donato Meoli \n
+ *         Dipartimento di Informatica \n
+ *         Universita' di Pisa \n
+ *
+ * \copyright &copy; by Antonio Frangioni, Donato Meoli
  */
 /*--------------------------------------------------------------------------*/
 /*----------------------------- DEFINITIONS --------------------------------*/
@@ -57,6 +155,8 @@
 #include "Solution.h"
 
 #include <exception>
+
+#include "MasterProblemBlock.h"
 
 #include <tuple>
 
@@ -85,8 +185,9 @@ namespace SMSpp_di_unipi_it {
 /// a CDASolver implementing Frank-Wolfe type algorithms
 /** The FrankWolfeSolver class derives from CDASolver and implements the
  * Frank-Wolfe (conditional gradient) family of algorithms, ported from the
- * Julia package FrankWolfe.jl. v1 implements the "vanilla" Frank-Wolfe
- * algorithm; Away-step and Blended Pairwise come later.
+ * Julia package FrankWolfe.jl: the "vanilla" Frank-Wolfe algorithm and the
+ * two active-set variants, Away-step and Blended Pairwise [see intAlgorithm],
+ * all three taking the direction selected by intFWDirection.
  *
  * The solver minimizes the "composite" objective
  *
@@ -171,9 +272,31 @@ class FrankWolfeSolver : public CDASolver
  enum line_search_type {
   LSAuto     = 0 , ///< exact if the father objective is quadratic, else agnostic
   LSAgnostic = 1 , ///< the open-loop 2/(t+2) rule
-  LSExact    = 2   ///< exact line search (requires a quadratic total objective)
+  LSExact    = 2 , ///< exact line search (needs a quadratic total objective)
+  LSFixed    = 3   ///< the fixed step dblFWStep
   };
 
+ /// where the iterates start from (value of intInitPoint)
+ enum init_point_type {
+  eInitLMO   = 0 , ///< the vertex the oracle gives at the current point
+  eInitBlock = 1   ///< the current values of the Variable of the Block
+  };
+
+ /// which direction the oracle is given (value of intFWDirection)
+ enum direction_type {
+  eDirGradient = 0 ,  ///< the gradient at the current iterate
+  eDirBundle   = 1 ,  ///< the master of two pieces, solved in closed form
+  eDirBundleMP = 2 ,  ///< the master of a bundle, a MasterProblemBlock
+  eDirAggregate = 3   ///< the current piece and the aggregate of the older
+  };
+
+ /// what a refused bundle direction is replaced by (value of intFWOnReject)
+ enum reject_type {
+  eRejGradient = 0 ,  ///< the gradient, i.e. the by-the-book step
+  eRejCorrect  = 1    ///< the combination of the two that passes the test
+  };
+
+/*--------------------------------------------------------------------------*/
  /// which Frank-Wolfe variant to run (value of intAlgorithm)
  enum algo_type {
   AlgVanilla  = 0 , ///< vanilla Frank-Wolfe (no active set)
@@ -218,7 +341,10 @@ class FrankWolfeSolver : public CDASolver
   intLineSearch ,
   ///< which line search to use
   /**< One of the line_search_type values: LSAuto (default), LSAgnostic,
-   * LSExact. */
+   * LSExact, LSFixed; the last one takes the step dblFWStep at every
+   * iteration (no larger than the largest one the active-set variants
+   * allow), which is what a nonconvex linking function may want, the
+   * open-loop rule being made for the convex ones. */
 
   intLMOSlvr ,
   ///< index of the registered :Solver of each sub-Block to use as its LMO
@@ -314,7 +440,141 @@ class FrankWolfeSolver : public CDASolver
    * feasibility re-check); v1 cold-starts each compute(), so the two modes
    * differ only in how much of the (cheap) structural cache is rebuilt. */
 
+  intFWDirection ,
+  ///< which direction the solver gives the oracle
+  /**< Selects what is passed to the LMO in place of the objective, one of the
+   * direction_type values:
+   *
+   * - eDirGradient (default): the gradient of the linking function at the
+   *   current iterate, i.e. the by-the-book method, which reduces the
+   *   function to its first-order model at that point;
+   *
+   * - eDirBundle: the solution of a stabilized master problem built out of
+   *   the first-order information already at hand, i.e. the current gradient
+   *   (whose linearization error at the current iterate is 0) together with
+   *   the one of the previous iterate, carried forward with its error. The
+   *   direction is then a convex combination of the two, hence an approximate
+   *   subgradient of the linking function at the current iterate, and the
+   *   weight of the older one grows with dblFWt. eDirGradient is the special
+   *   case in which that weight is 0, which is what dblFWt = 0 gives;
+   *
+   * - eDirBundleMP: the same master problem built out of a bundle of
+   *   intFWBundleSize pieces, kept and solved by a MasterProblemBlock whose
+   *   Solver strFWMPBCfg gives;
+   *
+   * - eDirAggregate: the same master problem of two pieces solved in closed
+   *   form, the older piece being not the gradient of the previous iterate
+   *   but the aggregate of all the older ones, i.e. the combination of them
+   *   that the master of the previous iteration has chosen, which takes the
+   *   place of the bundle it summarizes. Since a convex combination of
+   *   linearizations of a convex function is still below it, the aggregate
+   *   is a valid piece, and it carries the information of the whole history
+   *   in a vector and a constant. It needs the test of dblFWAccept, however
+   *   small: a direction that does not decrease the function gives a null
+   *   step, after which the aggregate and its error shrink by the same
+   *   factor and the master chooses the same direction again, so that
+   *   without the test the method may stay at the same iterate for good.
+   *
+   * The information the second mode uses is the one the method has already
+   * paid for: no evaluation is added [see the file documentation for where
+   * these formulae come from]. */
+
+  intFWBundleSize ,
+  ///< how many pieces the master problem of eDirBundleMP keeps
+  /**< The size of the bundle of pairs (gradient, linearization error) that
+   * the master problem of intFWDirection == eDirBundleMP is built on. With 2
+   * it is the master that eDirBundle solves in closed form, which is how the
+   * two are checked against each other; the larger it is, the more of the
+   * information the method has produced the direction is drawn from. Has no
+   * effect under the other directions. Default 10. */
+
+  intInitPoint ,
+  ///< where the iterates start from
+  /**< One of the init_point_type values: eInitLMO (default), the vertex the
+   * oracle gives with the gradient at the current values of the Variable,
+   * or eInitBlock, those values themselves, which must then be a point of
+   * the feasible region, e.g., an interior one found beforehand; it is only
+   * available with AlgVanilla, the active-set variants starting from a
+   * vertex. A warm start [see intHandleMod] takes precedence over both. */
+
+  intFWOnReject ,
+  ///< what a bundle direction refused by dblFWAccept is replaced by
+  /**< One of the reject_type values. With eRejGradient (default) the oracle
+   * is asked again with the gradient, i.e. the step is the by-the-book one.
+   * With eRejCorrect, when the refused direction z still decreases the
+   * function (0 < G < eta U, G being the decrease the gradient g promises
+   * towards its vertex and U the bound it gives), the oracle is asked with
+   * the combination ( 1 - lambda ) g + lambda z instead, lambda = ( 1 - eta )
+   * G / ( eta ( U - G ) ), whose step is known to pass the test; when it
+   * does not decrease the function, the gradient is taken as in the first
+   * case. Either way the cost is one more call to the oracle, and no further
+   * master problem. Has no effect when dblFWAccept is 0. */
+
+  intFWBestLB ,
+  ///< whether the best bound found so far replaces the one of the iteration
+  /**< With 0 (default) the stopping test and the test of dblFWAccept use the
+   * bound U the direction of the current iteration gives. With 1 they use
+   * U' = f( x ) - f_lb, f_lb being the best lower bound on the optimum found
+   * so far in this compute(), i.e. the largest f( x_k ) - U_k (the smallest
+   * upper bound, for a maximization): U' <= U, so that the test accepts at
+   * least the directions it accepted before and the method may stop sooner,
+   * and get_lb() reports f_lb. */
+
   intLastParFWSlv  ///< first allowed parameter value for derived classes
+  };
+
+/*--------------------------------------------------------------------------*/
+ /// public enum "extending" dbl_par_type_CDAS to FrankWolfeSolver
+
+ enum dbl_par_type_FWSlv {
+  dblFWt = dblLastParCDAS ,
+  ///< how much the master problem of eDirBundle is stabilized
+  /**< The weight of the squared norm in the master problem that gives the
+   * direction when intFWDirection is eDirBundle. The larger it is, the more
+   * the direction is the least-norm combination of the gradients at hand,
+   * whatever their linearization errors; the smaller it is, the more those
+   * errors matter, and with 0 the direction is the gradient at the current
+   * iterate, i.e. the by-the-book method. It has no effect under
+   * eDirGradient. Default 1.    *
+   * A NEGATIVE value asks for it to be taken from the problem instead: the
+   * coefficient of strong convexity of the father objective, which for a
+   * quadratic one is the smallest eigenvalue of its Hessian, bounded below
+   * by Gershgorin and exact when the objective is diagonal. That coefficient
+   * may well be 0, the objective being convex and not strongly so, and then
+   * there is no stabilization and the direction is the gradient.
+   */
+
+  dblFWStep ,
+  ///< the step of intLineSearch == LSFixed
+  /**< The step gamma in ( 0 , 1 ] that intLineSearch == LSFixed takes at
+   * every iteration. Default 0.75. */
+
+  dblFWAccept ,
+  ///< the fraction of the bound a step of a bundle direction has to keep
+  /**< The eta in [ 0 , 1 ) of the test a step towards the vertex of a
+   * direction other than the gradient has to pass: the decrease the
+   * gradient promises along it has to be at least eta times the bound the
+   * direction gives, or else the oracle is asked again with the gradient in
+   * the same iteration [see the class documentation]. With 0 the test is
+   * not made and the direction is always taken. It has no effect under
+   * eDirGradient. Default 0. */
+
+  dblLastParFWSlv  ///< first allowed parameter value for derived classes
+  };
+
+/*--------------------------------------------------------------------------*/
+ /// public enum "extending" str_par_type_CDAS to FrankWolfeSolver
+
+ enum str_par_type_FWSlv {
+  strFWMPBCfg = strLastParCDAS ,
+  ///< the BlockSolverConfig of the Solver of the master of eDirBundleMP
+  /**< The name of the file describing the BlockSolverConfig of the Solver
+   * that solves the master problem of intFWDirection == eDirBundleMP, which
+   * is a quadratic program. It is required by that direction, the master
+   * having no Solver of its own to fall back on, and compute() throws if it
+   * is not given; it has no effect under the other directions. */
+
+  strLastParFWSlv  ///< first allowed parameter value for derived classes
   };
 
 /** @} ---------------------------------------------------------------------*/
@@ -390,7 +650,39 @@ class FrankWolfeSolver : public CDASolver
 
 /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
 
+ [[nodiscard]] double get_dflt_dbl_par( idx_type par ) const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ void set_par( idx_type par , std::string && value ) override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] const std::string & get_str_par( idx_type par ) const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] idx_type str_par_str2idx( const std::string & name )
+  const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] const std::string & str_par_idx2str( idx_type idx )
+  const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
  [[nodiscard]] idx_type int_par_str2idx( const std::string & name )
+  const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] idx_type dbl_par_str2idx( const std::string & name )
+  const override;
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
+ [[nodiscard]] const std::string & dbl_par_idx2str( idx_type idx )
   const override;
 
 /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
@@ -462,6 +754,15 @@ class FrankWolfeSolver : public CDASolver
   /// snapshot of the original linear coefficients c_j (objective order)
   std::vector< Function::FunctionValue > c0;
 
+  /// the Variable this Solver added to the Objective of the sub-Block
+  /** A Variable of the father Objective that the Objective of its sub-Block
+   * does not price is added to it with a zero coefficient, so that the Oracle
+   * of that sub-Block sees the gradient this Solver scatters onto it; nothing
+   * of the problem changes, and the addition is undone when this Solver
+   * detaches [see cleanup()]. */
+
+  std::vector< Variable * > added;
+
   /// objective-order indices of the variables touched by the father gradient
   std::vector< Block::Index > obj_idx;
   /// father-gradient positions matching obj_idx (parallel vector)
@@ -530,6 +831,27 @@ class FrankWolfeSolver : public CDASolver
  /// issues no Modification (for teardown), else the change is propagated
  void restore_objectives( bool quiet );
 
+ /// open the channel of the father that holds the Modification of compute()
+ /** Opens a channel in the father Block and makes it the default channel of
+  * the father, recording the one it replaces and the linear coefficients of
+  * every sub-Block Objective. The Modification of the sub-Block still reach
+  * the Solver of the sub-Block (the LMO), which sees them before the father
+  * packs them, but no longer reach the other Solver of the father and of its
+  * ancestors. See compute(). */
+
+ void open_father_channel( void );
+
+ /// close the channel of open_father_channel(), if open
+ /** Gives the father back its previous default channel, then closes the
+  * channel: if the linear coefficients of every sub-Block Objective are
+  * those recorded when it was opened the change is none, and the channel is
+  * discarded; otherwise its content, i.e., the Modification of the last
+  * scatter() and of restore_objectives(), is shipped on that default
+  * channel, which brings whoever did not see the others to the state of the
+  * Block. */
+
+ void close_father_channel( void );
+
  /// process the Modification queued from the sub-Block (lazily, at compute());
  /// categorizes them and rebuilds the affected cached information
  void process_modifications( void );
@@ -542,6 +864,55 @@ class FrankWolfeSolver : public CDASolver
  /// acquire, for each sub-Block, the LMO :Solver at index intLMOSlvr
  void acquire_LMOs( void );
 
+ /// the direction the oracle is given, out of the information at hand
+ /** With intFWDirection == eDirBundle, replaces the direction the oracle is
+  * given with the solution of the stabilized master problem built out of the
+  * gradient at the current iterate, whose linearization error there is 0, and
+  * the one of the previous iterate carried forward with its own error; with
+  * two of them the master is solved in closed form. It then records the
+  * current pair as the previous one for the next iteration. Takes the value
+  * of the linking function at the current iterate, and expects f_xval to hold
+  * that iterate. Does nothing under eDirGradient. */
+
+ void bundle_direction( OFValue fx );
+
+/*--------------------------------------------------------------------------*/
+ /// the same direction, taken from a MasterProblemBlock [see eDirBundleMP]
+ /** Keeps a bundle of the pairs (gradient, linearization error) the method
+  * has produced, in a MasterProblemBlock with one component and a proximal
+  * stabilization, and takes its aggregated subgradient as the direction.
+  * With a bundle of two it is the closed form of bundle_direction(), which
+  * is how the two are checked against each other. */
+
+ void master_direction( OFValue fx );
+
+/*--------------------------------------------------------------------------*/
+ /// the same direction, out of the current piece and the aggregate one
+ /** Solves in closed form the master problem of the gradient at the current
+  * iterate and of the aggregate piece [see eDirAggregate], whose error at the
+  * iterate is computed from its vector and constant, then replaces the
+  * aggregate with the combination just chosen, which is the one the next
+  * iteration starts from. */
+
+ void aggregate_direction( OFValue fx );
+
+/*--------------------------------------------------------------------------*/
+ /// replaces a refused direction with one that passes the test, if it can
+ /** Under intFWOnReject == eRejCorrect, given the decrease dec the gradient
+  * promises towards the vertex of the refused direction and the bound cert
+  * that direction gives, with 0 < dec < cert, makes the direction the
+  * combination of it and of the gradient whose step passes the test of
+  * dblFWAccept, and returns true; returns false, and changes nothing,
+  * otherwise [see intFWOnReject]. */
+
+ bool correct_direction( OFValue dec , OFValue cert );
+
+/*--------------------------------------------------------------------------*/
+ /// builds the MasterProblemBlock of eDirBundleMP, once
+
+ void build_master( void );
+
+/*--------------------------------------------------------------------------*/
  /// evaluate the father Objective at the current point and fill f_grad
  void evaluate_gradient( void );
 
@@ -565,6 +936,9 @@ class FrankWolfeSolver : public CDASolver
  int run_event( int type );
 
  /// sum over the sub-Block of their (modified) objective at the current point
+ /// how much the master problem is stabilized [see dblFWt]
+ OFValue stab_weight( void ) const;
+
  OFValue eval_modified_objective( void );
 
  /// read the father active-variable values at the current point into dst
@@ -598,6 +972,38 @@ class FrankWolfeSolver : public CDASolver
  int f_max_atoms;      ///< intMaxAtoms
  int f_cvx_comb;       ///< intCvxComb (eObjAtX / eObjCvxComb)
  int f_handle_mod;     ///< intHandleMod (eModReset / eModFine)
+ int f_direction;      ///< intFWDirection (eDirGradient / eDirBundle / MP)
+
+ OFValue f_t_auto;     ///< the strong convexity of the father
+                       /**< The smallest eigenvalue of the Hessian of the
+                        * father objective, bounded below by Gershgorin and
+                        * exact when the objective is diagonal; 0 when the
+                        * objective is convex and not strongly so. It is what
+                        * a negative dblFWt asks for [see stab_weight()]. */
+
+ OFValue f_sigma;      ///< the linearization error of the direction
+                       /**< The sigma* that makes the direction a
+                        * sigma*-subgradient of the linking function at the
+                        * current iterate: 0 for the gradient, and what the
+                        * bound has to be weakened by otherwise [see
+                        * compute_vanilla()]. */
+ double f_t;           ///< dblFWt, the stabilization of that master problem
+ int f_bundle_size;    ///< intFWBundleSize, how many pieces the master keeps
+ int f_init_point;     ///< intInitPoint, where the iterates start from
+ double f_step;        ///< dblFWStep, the step of LSFixed
+ double f_accept;      ///< dblFWAccept, the eta of the test of a direction
+ int f_on_reject;      ///< intFWOnReject, what a refused direction becomes
+ int f_use_best;       ///< intFWBestLB, whether the best bound is used
+ OFValue f_best_bound; ///< the best bound of this compute() [see intFWBestLB]
+
+ MasterProblemBlock * f_mpb = nullptr;
+ ///< the master problem of eDirBundleMP, built once and kept
+
+ std::string f_mpb_cfg;
+ ///< strFWMPBCfg, the BlockSolverConfig of the Solver of that master
+
+ int f_next_slot = 0;
+ ///< which slot of the bundle the next piece takes when it is full
  int f_max_thread;     ///< intMaxThread
  int f_max_iter;       ///< intMaxIter
  double f_max_time;    ///< dblMaxTime
@@ -610,6 +1016,9 @@ class FrankWolfeSolver : public CDASolver
  // statistics of the last compute(), for the final-summary log (intLogVerb 1)
  Index f_niter = 0;        ///< iterations performed by the last compute()
  OFValue f_last_gap = 0;   ///< final Frank-Wolfe gap of the last compute()
+ Index f_n_accepted = 0;   ///< bundle directions taken in the last compute()
+ Index f_n_rejected = 0;   ///< bundle directions refused in the last compute()
+ Index f_n_corrected = 0;  ///< refused directions corrected [intFWOnReject]
 
  // problem structure - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
@@ -630,6 +1039,19 @@ class FrankWolfeSolver : public CDASolver
  std::vector< SubBlockData > v_sb;  ///< per-sub-Block bookkeeping
 
  std::vector< Function::FunctionValue > f_grad;  ///< father gradient buffer
+
+ std::vector< Function::FunctionValue > f_bdir;
+ ///< the direction of eDirBundle, when it is not the gradient itself
+
+ const std::vector< Function::FunctionValue > * p_dir = nullptr;
+ ///< what scatter() gives the oracle: f_grad, or f_bdir under eDirBundle
+
+ std::vector< Function::FunctionValue > f_pgrad;  ///< gradient of the previous
+ std::vector< Function::FunctionValue > f_pxval;  ///< iterate it was taken at
+ OFValue f_pval = 0;                              ///< value of the function there
+
+ std::vector< Function::FunctionValue > f_agg;    ///< the aggregate piece
+ OFValue f_agg_b = 0;  ///< its constant: the piece is f_agg_b + < f_agg , x >
  std::vector< Function::FunctionValue > f_xval;  ///< father active-var values at x
  std::vector< Function::FunctionValue > f_vval;  ///< father active-var values at v
 
@@ -645,6 +1067,10 @@ class FrankWolfeSolver : public CDASolver
  OFValue f_bound = 0;          ///< F(x) - gap, best bound found
  bool f_has_sol = false;       ///< whether a (primal) solution is available
  bool f_modified = false;      ///< whether the sub-Block objectives were modified
+ Observer::ChnlName f_chnl = 0;      ///< the channel of the father in compute()
+ Observer::ChnlName f_old_chnl = 0;  ///< the default channel it replaced
+ /// linear coefficients of each sub-Block Objective when f_chnl was opened
+ std::vector< std::vector< Function::FunctionValue > > f_c_open;
  bool f_lmo_infeas = false;    ///< whether the last run_LMOs found an infeasible
                                ///< sub-Block (=> the father is infeasible)
 

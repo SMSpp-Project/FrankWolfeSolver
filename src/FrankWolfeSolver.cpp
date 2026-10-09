@@ -13,7 +13,11 @@
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \copyright &copy; by Antonio Frangioni
+ * \author Donato Meoli \n
+ *         Dipartimento di Informatica \n
+ *         Universita' di Pisa \n
+ *
+ * \copyright &copy; by Antonio Frangioni, Donato Meoli
  */
 /*--------------------------------------------------------------------------*/
 /*------------------------------ INCLUDES ----------------------------------*/
@@ -65,8 +69,19 @@ SMSpp_insert_in_factory_cpp_0( FrankWolfeSolver );
 
 static const std::vector< std::string > FWSlv_int_pars_str = {
  "intLMOObj" , "intLineSearch" , "intLMOSlvr" , "intAlgorithm" , "intMaxAtoms" ,
- "intCvxComb" , "intHandleMod"
+ "intCvxComb" , "intHandleMod" , "intFWDirection" , "intFWBundleSize" ,
+ "intInitPoint" , "intFWOnReject" , "intFWBestLB"
  };
+
+/*--------------------------------------------------------------------------*/
+
+static const std::vector< std::string > FWSlv_str_pars_str = { "strFWMPBCfg" };
+
+/*--------------------------------------------------------------------------*/
+
+static const std::vector< std::string > FWSlv_dbl_pars_str = { "dblFWt" ,
+								  "dblFWStep" ,
+								  "dblFWAccept" };
 
 /*--------------------------------------------------------------------------*/
 /*---------------------------- AUXILIARY ROUTINES --------------------------*/
@@ -81,6 +96,17 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_max_atoms   = get_dflt_int_par( intMaxAtoms );
  f_cvx_comb    = get_dflt_int_par( intCvxComb );
  f_handle_mod  = get_dflt_int_par( intHandleMod );
+ f_direction   = get_dflt_int_par( intFWDirection );
+ f_sigma       = 0;
+ f_t_auto      = 0;
+ f_t           = get_dflt_dbl_par( dblFWt );
+ f_bundle_size = get_dflt_int_par( intFWBundleSize );
+ f_init_point  = get_dflt_int_par( intInitPoint );
+ f_step        = get_dflt_dbl_par( dblFWStep );
+ f_accept      = get_dflt_dbl_par( dblFWAccept );
+ f_on_reject   = get_dflt_int_par( intFWOnReject );
+ f_use_best    = get_dflt_int_par( intFWBestLB );
+ f_best_bound  = 0;
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
  f_max_time    = get_dflt_dbl_par( dblMaxTime );
@@ -97,6 +123,14 @@ void FrankWolfeSolver::set_default_parameters( void )
 
 void FrankWolfeSolver::cleanup( void )
 {
+ // the master problem of eDirBundleMP goes with the Block it was built for
+ if( f_mpb ) {
+  f_mpb->unregister_Solvers();
+  delete f_mpb;
+  f_mpb = nullptr;
+  f_next_slot = 0;
+  }
+
  // if the sub-Block objectives were modified, restore the original linear
  // coefficients so that the Block is left pristine
 
@@ -111,6 +145,21 @@ void FrankWolfeSolver::cleanup( void )
  // restore_objectives)
  if( f_modified )
   restore_objectives( true );
+
+ // take back out of the sub-Block Objective the Variable that were put there
+ // to give the Oracle the gradient of the father [see analyze_subBlocks()],
+ // so that the Block is left as it was found; quiet, for the same reason
+ // restore_objectives() is quiet here
+ for( auto & d : v_sb )
+  for( auto var : d.added ) {
+   const Index i = d.fun->is_active( var );
+   if( i >= d.fun->get_num_active_var() )
+    continue;
+   if( d.dq )
+    d.dq->remove_variable( i , eNoMod );
+   else
+    d.lin->remove_variable( i , eNoMod );
+   }
 
  v_sb.clear();
  f_grad.clear();
@@ -154,10 +203,11 @@ void FrankWolfeSolver::restore_objectives( bool quiet )
  // teardown, and re-snapshotted by set_Block on a later re-attach.
  //
  // quiet == false issues the change normally: used at the end of compute(),
- // when all the :Solver are alive, so the bridge (and the other :Solver) are
- // correctly notified. FrankWolfeSolver itself ignores the resulting
- // Modification because it is inhibited around this call (a self-inflicted
- // change), see compute().
+ // when all the :Solver are alive, so the bridge and the LMO are correctly
+ // notified, while the other :Solver of the father see it only if the
+ // channel of compute() is shipped [see close_father_channel()].
+ // FrankWolfeSolver itself ignores the resulting Modification because it is
+ // inhibited around this call (a self-inflicted change), see compute().
  const ModParam par = quiet ? eNoMod : eModBlck;
  const bool alpha = ( f_lmo_obj == LMOFull );
 
@@ -196,6 +246,72 @@ void FrankWolfeSolver::restore_objectives( bool quiet )
   }
 
  f_modified = false;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::open_father_channel( void )
+{
+ f_c_open.resize( v_sb.size() );
+ for( Index j = 0 ; j < v_sb.size() ; ++j ) {
+  const auto & d = v_sb[ j ];
+  const Index n = d.fun->get_num_active_var();
+  auto & c = f_c_open[ j ];
+  c.resize( n );
+  for( Index i = 0 ; i < n ; ++i )
+   c[ i ] = d.dq ? d.dq->get_linear_coefficient( i )
+                 : d.lin->get_coefficient( i );
+  }
+
+ f_old_chnl = f_Block->get_default_channel();
+ f_chnl = f_Block->open_channel();
+ f_Block->set_default_channel( f_chnl );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::close_father_channel( void )
+{
+ if( ! f_chnl )
+  return;
+
+ const auto chnl = f_chnl;
+ f_chnl = 0;
+
+ // the change is none if every linear coefficient is back to its value when
+ // the channel was opened (which restore_objectives() gives, unless it has
+ // been prevented from completing)
+ bool same = ( f_c_open.size() == v_sb.size() );
+ for( Index j = 0 ; same && ( j < v_sb.size() ) ; ++j ) {
+  const auto & d = v_sb[ j ];
+  const auto & c = f_c_open[ j ];
+  const Index n = d.fun->get_num_active_var();
+  if( n != Index( c.size() ) ) {
+   same = false;
+   break;
+   }
+  for( Index i = 0 ; i < n ; ++i )
+   if( ( d.dq ? d.dq->get_linear_coefficient( i )
+              : d.lin->get_coefficient( i ) ) != c[ i ] ) {
+    same = false;
+    break;
+    }
+  }
+
+ f_c_open.clear();
+
+ // the previous default channel first, so that what is shipped goes where
+ // the Modification of the father went before; it may be no longer open if
+ // it has been closed meanwhile, and then it is 0
+ try {
+  f_Block->set_default_channel( f_old_chnl );
+  }
+ catch( std::invalid_argument & ) {
+  f_Block->set_default_channel( 0 );
+  }
+ f_old_chnl = 0;
+
+ f_Block->close_channel( chnl , false , same );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -304,13 +420,13 @@ void FrankWolfeSolver::set_Block( Block * block )
 
  // the father Block must have no Variable and no Constraint of its own- - - -
 
- if( ( ! block->get_static_variables().empty() ) ||
-     ( ! block->get_dynamic_variables().empty() ) )
+ if( ( ! block->get_static_variable_groups().empty() ) ||
+     ( ! block->get_dynamic_variable_groups().empty() ) )
   throw( std::invalid_argument(
    "FrankWolfeSolver: the father Block must have no Variable of its own" ) );
 
- if( ( ! block->get_static_constraints().empty() ) ||
-     ( ! block->get_dynamic_constraints().empty() ) )
+ if( ( ! block->get_static_constraint_groups().empty() ) ||
+     ( ! block->get_dynamic_constraint_groups().empty() ) )
   throw( std::invalid_argument(
    "FrankWolfeSolver: the father Block must have no Constraint of its own" ) );
 
@@ -366,6 +482,27 @@ void FrankWolfeSolver::analyze_father( void )
                                      it.value() );
    }
   }
+
+ // the strong convexity of the father, which is what dblFWt is measured
+ // against: for a quadratic objective it is the smallest eigenvalue of the
+ // Hessian, and Gershgorin bounds that from below by the smallest row of the
+ // diagonal minus the sum of the absolute values of what is off it, which is
+ // exact when there is nothing off it, i.e. for a DQuadFunction. It may well
+ // be 0, the objective being convex and not strongly so, and then there is
+ // nothing to take: whoever asked for it is left with the gradient
+ f_t_auto = 0;
+ if( ! f_father_diag.empty() ) {
+  std::vector< OFValue > row( f_father_diag.size() , 0 );
+  for( const auto & [ r , c , q ] : f_father_offdiag ) {
+   row[ r ] += std::abs( q );
+   row[ c ] += std::abs( q );
+   }
+  f_t_auto = Inf< OFValue >();
+  for( Index p = 0 ; p < Index( f_father_diag.size() ) ; ++p )
+   f_t_auto = std::min( f_t_auto , OFValue( f_father_diag[ p ] ) - row[ p ] );
+  if( f_t_auto < 0 )
+   f_t_auto = 0;
+  }
  }
 
 /*--------------------------------------------------------------------------*/
@@ -380,16 +517,30 @@ void FrankWolfeSolver::analyze_subBlocks( void )
   throw( std::invalid_argument(
    "FrankWolfeSolver: the father Block has no sub-Block" ) );
 
- // scan the sub-Block: validate the objectives, snapshot the original linear
- // coefficients, and record the position of each variable in its objective - -
+ // scan the sub-Block: validate the objectives and record the position each
+ // of their variables has in them - - - - - - - - - - - - - - - - - - - - - -
+
+ // what was added to which sub-Block Objective survives a re-analysis: the
+ // Variable are still there, hence they are found among the active ones
+ // below, but this Solver has to keep knowing that they are its own and that
+ // it has to take them back out when it detaches
+ std::unordered_map< const Block * , std::vector< Variable * > > was_added;
+ for( auto & d : v_sb )
+  if( ! d.added.empty() )
+   was_added[ d.block ] = std::move( d.added );
 
  v_sb.clear();
  v_sb.resize( f_nsb );
  std::unordered_map< Variable * , std::pair< Index , Index > > var2pos;
+ std::unordered_map< const Block * , Index > blk2sb;
 
  for( Index j = 0 ; j < f_nsb ; ++j ) {
   auto & d = v_sb[ j ];
   d.block = sb[ j ];
+  blk2sb[ d.block ] = j;
+
+  if( auto it = was_added.find( d.block ) ; it != was_added.end() )
+   d.added = std::move( it->second );
 
   d.obj = dynamic_cast< FRealObjective * >( d.block->get_objective() );
   if( ! d.obj )
@@ -408,28 +559,76 @@ void FrankWolfeSolver::analyze_subBlocks( void )
     "sense differs from the father one" ) );
 
   Index n = d.fun->get_num_active_var();
-  d.c0.resize( n );
-  for( Index i = 0 ; i < n ; ++i ) {
-   d.c0[ i ] = d.dq ? d.dq->get_linear_coefficient( i )
-                    : d.lin->get_coefficient( i );
+  for( Index i = 0 ; i < n ; ++i )
    var2pos[ d.fun->get_active_var( i ) ] = { j , i };
-   }
   }
 
- // build the gradient-to-sub-Block scatter map: every active variable of the
- // father Objective must be active in (exactly) one sub-Block Objective - - -
+ // the father-Objective Variable that no sub-Block Objective prices - - - - -
+ //
+ // Such a Variable belongs to a sub-Block all the same, the Block it is of
+ // saying which one, and it is the Oracle of that sub-Block that has to price
+ // it: it is therefore added to the Objective of that sub-Block with a zero
+ // coefficient, which leaves the problem the Oracle solves unchanged while
+ // giving this Solver somewhere to scatter the gradient. The addition is
+ // undone when this Solver detaches [see cleanup()]. A Variable of no
+ // sub-Block, on the other hand, is one the decomposition cannot move, and
+ // there is nothing to be done with it.
 
  Index G = f_fun->get_num_active_var();
+
+ for( Index p = 0 ; p < G ; ++p ) {
+  auto var = f_fun->get_active_var( p );
+  if( var2pos.count( var ) )
+   continue;
+
+  // the sub-Block the Variable is of, i.e. the Block of it, or whichever of
+  // its ancestors is a son of the father
+  Index j = Inf< Index >();
+  for( auto b = var->get_Block() ; b ; b = b->get_f_Block() )
+   if( auto it = blk2sb.find( b ) ; it != blk2sb.end() ) {
+    j = it->second;
+    break;
+    }
+
+  if( j == Inf< Index >() )
+   throw( std::invalid_argument( "FrankWolfeSolver: a father-Objective "
+    "Variable is of no sub-Block" ) );
+
+  auto & d = v_sb[ j ];
+  auto cvar = dynamic_cast< ColVariable * >( var );
+  if( ! cvar )
+   throw( std::invalid_argument( "FrankWolfeSolver: a father-Objective "
+    "Variable is not a ColVariable" ) );
+
+  const Index i = d.fun->get_num_active_var();
+  if( d.dq )
+   d.dq->add_variable( cvar , 0 , 0 );
+  else
+   d.lin->add_variable( cvar , 0 );
+
+  d.added.push_back( var );
+  var2pos[ var ] = { j , i };
+  }
+
+ // snapshot the original linear coefficients, the ones just added comprised,
+ // and build the gradient-to-sub-Block scatter map - - - - - - - - - - - - -
+
+ for( Index j = 0 ; j < f_nsb ; ++j ) {
+  auto & d = v_sb[ j ];
+  Index n = d.fun->get_num_active_var();
+  d.c0.resize( n );
+  for( Index i = 0 ; i < n ; ++i )
+   d.c0[ i ] = d.dq ? d.dq->get_linear_coefficient( i )
+                    : d.lin->get_coefficient( i );
+  }
+
  f_grad.resize( G );
 
  for( Index p = 0 ; p < G ; ++p ) {
-  auto it = var2pos.find( f_fun->get_active_var( p ) );
-  if( it == var2pos.end() )
-   throw( std::invalid_argument( "FrankWolfeSolver: a father-Objective "
-    "variable is not active in any sub-Block Objective" ) );
-  auto & d = v_sb[ it->second.first ];
+  auto & pos = var2pos[ f_fun->get_active_var( p ) ];
+  auto & d = v_sb[ pos.first ];
   d.grad_idx.push_back( p );
-  d.obj_idx.push_back( it->second.second );
+  d.obj_idx.push_back( pos.second );
   }
 
  f_xval.resize( G );
@@ -466,6 +665,36 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
   case( intMaxAtoms ):   f_max_atoms = value;   return;
   case( intCvxComb ):    f_cvx_comb = value;    return;
   case( intHandleMod ):  f_handle_mod = value;  return;
+  case( intFWDirection ):
+   if( ( value < eDirGradient ) || ( value > eDirAggregate ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWDirection "
+                                  "must be between 0 and 3" ) );
+   f_direction = value;
+   return;
+  case( intFWBundleSize ):
+   if( value < 2 )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWBundleSize "
+                                  "must be at least 2" ) );
+   f_bundle_size = value;
+   return;
+  case( intInitPoint ):
+   if( ( value != eInitLMO ) && ( value != eInitBlock ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intInitPoint "
+                                  "must be 0 or 1" ) );
+   f_init_point = value;
+   return;
+  case( intFWOnReject ):
+   if( ( value != eRejGradient ) && ( value != eRejCorrect ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWOnReject "
+                                  "must be 0 or 1" ) );
+   f_on_reject = value;
+   return;
+  case( intFWBestLB ):
+   if( ( value != 0 ) && ( value != 1 ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWBestLB "
+                                  "must be 0 or 1" ) );
+   f_use_best = value;
+   return;
   case( intMaxThread ):  f_max_thread = value;  return;
   case( intMaxIter ):    f_max_iter = value;    return;
   case( intLogVerb ):    f_log_verb = value;    return;
@@ -483,6 +712,23 @@ void FrankWolfeSolver::set_par( idx_type par , double value )
   case( dblRelAcc ):   f_rel_acc = value;  return;
   case( dblAbsAcc ):   f_abs_acc = value;  return;
   case( dblEveryTTm ): f_every_t = value; return;
+  case( dblFWt ):
+   // a negative value is not a weight but the request to take one from the
+   // problem, i.e. from the strong convexity of the father [see dblFWt]
+   f_t = value;
+   return;
+  case( dblFWStep ):
+   if( ! ( ( value > 0 ) && ( value <= 1 ) ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: dblFWStep "
+                                  "must be in ( 0 , 1 ]" ) );
+   f_step = value;
+   return;
+  case( dblFWAccept ):
+   if( ! ( ( value >= 0 ) && ( value < 1 ) ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: dblFWAccept "
+                                  "must be in [ 0 , 1 )" ) );
+   f_accept = value;
+   return;
   default:             CDASolver::set_par( par , value );
   }
  }
@@ -499,6 +745,11 @@ int FrankWolfeSolver::get_dflt_int_par( idx_type par ) const
   case( intMaxAtoms ):   return( 0 );
   case( intCvxComb ):    return( eObjCvxComb );
   case( intHandleMod ):  return( eModReset );
+  case( intFWDirection ): return( eDirGradient );
+  case( intFWBundleSize ): return( 10 );
+  case( intInitPoint ):  return( eInitLMO );
+  case( intFWOnReject ): return( eRejGradient );
+  case( intFWBestLB ):   return( 0 );
   default:               return( CDASolver::get_dflt_int_par( par ) );
   }
  }
@@ -515,6 +766,11 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intMaxAtoms ):   return( f_max_atoms );
   case( intCvxComb ):    return( f_cvx_comb );
   case( intHandleMod ):  return( f_handle_mod );
+  case( intFWDirection ): return( f_direction );
+  case( intFWBundleSize ): return( f_bundle_size );
+  case( intInitPoint ):  return( f_init_point );
+  case( intFWOnReject ): return( f_on_reject );
+  case( intFWBestLB ):   return( f_use_best );
   case( intMaxThread ):  return( f_max_thread );
   case( intMaxIter ):    return( f_max_iter );
   case( intLogVerb ):    return( f_log_verb );
@@ -532,8 +788,91 @@ double FrankWolfeSolver::get_dbl_par( idx_type par ) const
   case( dblRelAcc ):   return( f_rel_acc );
   case( dblAbsAcc ):   return( f_abs_acc );
   case( dblEveryTTm ): return( f_every_t );
+  case( dblFWt ):      return( f_t );
+  case( dblFWStep ):   return( f_step );
+  case( dblFWAccept ): return( f_accept );
   default:             return( CDASolver::get_dbl_par( par ) );
   }
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::set_par( idx_type par , std::string && value )
+{
+ if( par == strFWMPBCfg ) {
+  f_mpb_cfg = std::move( value );
+  return;
+  }
+
+ CDASolver::set_par( par , std::move( value ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+const std::string & FrankWolfeSolver::get_str_par( idx_type par ) const
+{
+ if( par == strFWMPBCfg )
+  return( f_mpb_cfg );
+
+ return( CDASolver::get_str_par( par ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+Solver::idx_type FrankWolfeSolver::str_par_str2idx( const std::string & name )
+ const
+{
+ for( idx_type i = 0 ; i < FWSlv_str_pars_str.size() ; ++i )
+  if( name == FWSlv_str_pars_str[ i ] )
+   return( strLastParCDAS + i );
+
+ return( CDASolver::str_par_str2idx( name ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+const std::string & FrankWolfeSolver::str_par_idx2str( idx_type idx ) const
+{
+ if( ( idx >= strLastParCDAS ) && ( idx < strLastParFWSlv ) )
+  return( FWSlv_str_pars_str[ idx - strLastParCDAS ] );
+
+ return( CDASolver::str_par_idx2str( idx ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+double FrankWolfeSolver::get_dflt_dbl_par( idx_type par ) const
+{
+ if( par == dblFWt )
+  return( 1 );
+ if( par == dblFWStep )
+  return( 0.75 );
+ if( par == dblFWAccept )
+  return( 0 );
+
+ return( CDASolver::get_dflt_dbl_par( par ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+Solver::idx_type FrankWolfeSolver::dbl_par_str2idx( const std::string & name )
+ const
+{
+ for( idx_type i = 0 ; i < FWSlv_dbl_pars_str.size() ; ++i )
+  if( name == FWSlv_dbl_pars_str[ i ] )
+   return( dblLastParCDAS + i );
+
+ return( CDASolver::dbl_par_str2idx( name ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+const std::string & FrankWolfeSolver::dbl_par_idx2str( idx_type idx ) const
+{
+ if( ( idx >= dblLastParCDAS ) && ( idx < dblLastParFWSlv ) )
+  return( FWSlv_dbl_pars_str[ idx - dblLastParCDAS ] );
+
+ return( CDASolver::dbl_par_idx2str( idx ) );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -597,12 +936,316 @@ void FrankWolfeSolver::evaluate_gradient( void )
 
 /*--------------------------------------------------------------------------*/
 
+void FrankWolfeSolver::build_master( void )
+{
+ /* One component, the linking function, whose bundle is the pairs the method
+  * produces; the stabilization is the proximal one, which is the master the
+  * formulae of the file documentation are written for. The master works in
+  * the space of the "active" Variable of the linking function, which is the
+  * space the gradients live in. */
+
+ if( f_mpb_cfg.empty() )
+  throw( std::logic_error( "FrankWolfeSolver: the direction of eDirBundleMP "
+                           "comes from a master problem, which needs the "
+                           "BlockSolverConfig of a Solver [strFWMPBCfg]" ) );
+
+ f_mpb = new MasterProblemBlock();
+
+ f_mpb->configure( true ,                        // the primal form
+                   std::max( f_bundle_size , 2 ) ,
+                   int( f_grad.size() ) ,
+                   1 ,                           // one hard component
+                   std::vector< C05Function * >() ,
+                   {} ,
+                   MasterProblemBlock::kProximal ,
+                   ! f_max );
+
+ // no bound on the displacement: the direction is taken for its own sake,
+ // the step being what the line search of the method decides
+ const auto INF = Inf< double >();
+ f_mpb->set_box( std::vector< double >( f_grad.size() , - INF ) ,
+                 std::vector< double >( f_grad.size() , INF ) );
+
+ f_mpb->register_Solver( std::string( f_mpb_cfg ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::master_direction( OFValue fx )
+{
+ if( ! f_mpb )
+  build_master();
+
+ const Index G = Index( f_grad.size() );
+
+ /* The current iterate is the stability centre, and every linearization is
+  * read against it: the master keeps the constants as they are and rebuilds
+  * the errors itself at every reference it is given, which is the property
+  * that makes carrying the older pieces forward free. */
+
+ f_mpb->set_reference( f_xval , std::vector< double >( 1 , double( fx ) ) );
+
+ // the gradient at the current iterate, whose constant is the value of the
+ // function there, i.e. an error of 0 at the centre
+ std::vector< double > g( f_grad.begin() , f_grad.end() );
+ double alpha = double( fx );
+ for( Index p = 0 ; p < G ; ++p )
+  alpha -= g[ p ] * f_xval[ p ];
+
+ if( f_mpb->add_cut( 0 , std::move( g ) , alpha ) < 0 ) {
+  // the bundle is full: the oldest piece makes room for the new one
+  f_mpb->remove_cut( 0 , f_next_slot );
+  std::vector< double > gg( f_grad.begin() , f_grad.end() );
+  f_mpb->add_cut( 0 , f_next_slot , std::move( gg ) , alpha );
+  }
+ f_next_slot = ( f_next_slot + 1 ) % std::max( f_bundle_size , 2 );
+
+ f_mpb->set_t( stab_weight() );
+
+ if( f_mpb->solve_master() < Solver::kOK ) {
+  p_dir = & f_grad;                     // the master says nothing: the
+  f_sigma = 0;                          // gradient is always a fallback
+  return;
+  }
+
+ const auto z = f_mpb->get_aggregated_subgradient( 0 );
+ if( z.size() < G ) {
+  p_dir = & f_grad;
+  f_sigma = 0;
+  return;
+  }
+
+ f_bdir.resize( G );
+ for( Index p = 0 ; p < G ; ++p )
+  f_bdir[ p ] = z[ p ];
+ p_dir = & f_bdir;
+
+ // the aggregate linearization error of the direction at the current
+ // iterate, i.e. the sigma* that makes z* a sigma*-subgradient there: it is
+ // what the bound has to be weakened by [see compute_vanilla()]
+ f_sigma = f_mpb->get_aggregated_alpha( 0 );
+ if( f_sigma < 0 )
+  f_sigma = 0;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::bundle_direction( OFValue fx )
+{
+ // the direction is the gradient unless one is built below, and the gradient
+ // is a subgradient with no error at all
+ f_sigma = 0;
+
+ if( f_direction == eDirBundleMP ) {
+  master_direction( fx );
+  f_pgrad = f_grad;
+  f_pxval = f_xval;
+  f_pval = fx;
+  return;
+  }
+
+ if( f_direction == eDirAggregate ) {
+  aggregate_direction( fx );
+  return;
+  }
+
+ if( f_direction != eDirBundle ) {
+  p_dir = & f_grad;
+  return;
+  }
+
+ const Index G = Index( f_grad.size() );
+
+ /* The master problem of the two pieces (g, 0) at the current iterate and
+  * (gp, alpha) at the previous one is, in its dual form,
+  *
+  *   min { alpha theta + ( t / 2 ) || g + theta ( gp - g ) ||^2 :
+  *         theta in [ 0 , 1 ] }
+  *
+  * whose solution is written down at once. With theta = 0 the direction is
+  * the gradient, i.e. the by-the-book method, which is what a t of 0, a
+  * first iteration or two gradients that agree give. */
+
+ const OFValue t = stab_weight();
+
+ if( ( ! f_pgrad.empty() ) && ( t > 0 ) ) {
+  // the linearization error of the previous gradient at the current iterate,
+  // which convexity makes non-negative: what is below 0 is numerical noise
+  OFValue alpha = fx - f_pval;
+  for( Index p = 0 ; p < G ; ++p )
+   alpha -= f_pgrad[ p ] * ( f_xval[ p ] - f_pxval[ p ] );
+  if( alpha < 0 )
+   alpha = 0;
+
+  OFValue gd = 0 , dd = 0;
+  for( Index p = 0 ; p < G ; ++p ) {
+   const auto di = f_pgrad[ p ] - f_grad[ p ];
+   gd += f_grad[ p ] * di;
+   dd += di * di;
+   }
+
+  OFValue theta = 0;
+  if( dd > 0 ) {
+   theta = - ( t * gd + alpha ) / ( t * dd );
+   if( theta < 0 )
+    theta = 0;
+   else
+    if( theta > 1 )
+     theta = 1;
+   }
+
+  if( theta > 0 ) {
+   f_bdir.resize( G );
+   for( Index p = 0 ; p < G ; ++p )
+    f_bdir[ p ] = f_grad[ p ] + theta * ( f_pgrad[ p ] - f_grad[ p ] );
+   p_dir = & f_bdir;
+
+   // the direction is the combination of a linearization with error 0, the
+   // gradient here, and one with error alpha, so it is a sigma*-subgradient
+   // with sigma* = theta alpha [see compute_vanilla()]
+   f_sigma = theta * alpha;
+   }
+  else
+   p_dir = & f_grad;
+  }
+ else
+  p_dir = & f_grad;
+
+ // whatever the direction, what is recorded for the next iteration is the
+ // gradient as it is, together with the point it was taken at and the value
+ // of the function there
+ f_pgrad = f_grad;
+ f_pxval = f_xval;
+ f_pval = fx;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::aggregate_direction( OFValue fx )
+{
+ const Index G = Index( f_grad.size() );
+
+ /* The two pieces are the gradient g at the current iterate x, whose error
+  * there is 0, and the aggregate a with constant b, whose error at x is
+  * sigma = f( x ) - b - < a , x >, non-negative since the aggregate is a
+  * combination of linearizations of the convex linking function. The master
+  * problem is, in its dual form,
+  *
+  *   min { lambda sigma + ( t / 2 ) || g + lambda ( a - g ) ||^2 :
+  *         lambda in [ 0 , 1 ] }
+  *
+  * whose solution is written down at once, and the aggregate of the next
+  * iteration is the combination it chooses, whatever happens to the
+  * direction afterwards. */
+
+ // the constant of the piece of the gradient at x: f( x ) - < g , x >
+ OFValue bc = fx;
+ for( Index p = 0 ; p < G ; ++p )
+  bc -= f_grad[ p ] * f_xval[ p ];
+
+ const OFValue t = stab_weight();
+ OFValue lambda = 0;
+
+ if( ( f_agg.size() == G ) && ( t > 0 ) ) {
+  // what is below 0 is numerical noise
+  OFValue sigma = fx - f_agg_b;
+  for( Index p = 0 ; p < G ; ++p )
+   sigma -= f_agg[ p ] * f_xval[ p ];
+  if( sigma < 0 )
+   sigma = 0;
+
+  OFValue gd = 0 , dd = 0;
+  for( Index p = 0 ; p < G ; ++p ) {
+   const auto di = f_agg[ p ] - f_grad[ p ];
+   gd += f_grad[ p ] * di;
+   dd += di * di;
+   }
+
+  if( dd > 0 )
+   lambda = std::min( OFValue( 1 ) ,
+                      std::max( OFValue( 0 ) , - ( sigma + t * gd ) /
+                                               ( t * dd ) ) );
+
+  if( lambda > 0 ) {
+   f_bdir.resize( G );
+   for( Index p = 0 ; p < G ; ++p )
+    f_bdir[ p ] = f_grad[ p ] + lambda * ( f_agg[ p ] - f_grad[ p ] );
+   p_dir = & f_bdir;
+   f_sigma = lambda * sigma;
+   }
+  else
+   p_dir = & f_grad;
+
+  for( Index p = 0 ; p < G ; ++p )
+   f_agg[ p ] = f_grad[ p ] + lambda * ( f_agg[ p ] - f_grad[ p ] );
+  f_agg_b = bc + lambda * ( f_agg_b - bc );
+  }
+ else {
+  // no aggregate yet, or no stabilization: the direction is the gradient,
+  // and the aggregate starts from its piece
+  p_dir = & f_grad;
+  f_agg.assign( f_grad.begin() , f_grad.end() );
+  f_agg_b = bc;
+  }
+ }
+
+/*--------------------------------------------------------------------------*/
+
+bool FrankWolfeSolver::correct_direction( OFValue dec , OFValue cert )
+{
+ // only a direction that decreases the function can be corrected, and only
+ // when intFWOnReject asks for it
+ if( ( f_on_reject != eRejCorrect ) || ( ! ( dec > 0 ) ) ||
+     ( ! ( cert > dec ) ) )
+  return( false );
+
+ /* With z the refused direction, U = cert the bound it gives and G = dec the
+  * decrease the gradient g promises towards its vertex, 0 < G < eta U, the
+  * direction ( 1 - lambda ) g + lambda z with the lambda below is an
+  * approximate subgradient with error lambda sigma*, and the step towards
+  * its vertex passes the test of dblFWAccept (Iommazzo, Rinaldi, Frangioni,
+  * the certified correction): the current piece having error 0, the
+  * combination gives a bound of at most ( 1 - lambda ) G+ + lambda U, G+ >= G
+  * being the decrease towards the new vertex. */
+
+ const OFValue lambda = ( 1 - f_accept ) * dec / ( f_accept * ( cert - dec ) );
+ if( ! ( ( lambda > 0 ) && ( lambda < 1 ) ) )
+  return( false );
+
+ const Index G = Index( f_grad.size() );
+ const auto & dir = *p_dir;
+ std::vector< Function::FunctionValue > cdir( G );
+ for( Index p = 0 ; p < G ; ++p )
+  cdir[ p ] = f_grad[ p ] + lambda * ( dir[ p ] - f_grad[ p ] );
+ f_bdir = std::move( cdir );
+ p_dir = & f_bdir;
+ f_sigma *= lambda;
+ ++f_n_corrected;
+ return( true );
+ }
+
+/*--------------------------------------------------------------------------*/
+
 void FrankWolfeSolver::scatter( void )
 {
  // write alpha * c_j + g_j into the linear coefficients of each sub-Block
  // Objective; the quadratic part (if any) is left untouched
 
  const bool alpha = ( f_lmo_obj == LMOFull );
+
+ // the Modification of the previous scatter() are superseded by those
+ // below, which touch the same coefficients: the channel of the father
+ // keeps only the last ones [see compute()]
+ if( f_chnl )
+  f_Block->clear_channel( f_chnl );
+
+ // set before the first change, so that restore_objectives() also undoes a
+ // scatter() interrupted by an exception
+ f_modified = true;
+
+ // what the oracle is given is the gradient unless a direction has been
+ // built out of more than it [see bundle_direction()]
+ const auto & dir = p_dir ? *p_dir : f_grad;
 
  for( auto & d : v_sb ) {
   Index n = Index( d.c0.size() );
@@ -620,7 +1263,7 @@ void FrankWolfeSolver::scatter( void )
    std::vector< std::pair< Index , FunctionValue > > upd( d.obj_idx.size() );
    for( Index k = 0 ; k < d.obj_idx.size() ; ++k )
     upd[ k ] = { d.obj_idx[ k ] ,
-                 d.c0[ d.obj_idx[ k ] ] + f_grad[ d.grad_idx[ k ] ] };
+                 d.c0[ d.obj_idx[ k ] ] + dir[ d.grad_idx[ k ] ] };
    std::sort( upd.begin() , upd.end() );
    Function::Subset nms( upd.size() );
    Function::Vec_FunctionValue nc( upd.size() );
@@ -641,7 +1284,7 @@ void FrankWolfeSolver::scatter( void )
    for( Index i = 0 ; i < n ; ++i )
     nc[ i ] = d.c0[ i ];
   for( Index k = 0 ; k < d.obj_idx.size() ; ++k )
-   nc[ d.obj_idx[ k ] ] += f_grad[ d.grad_idx[ k ] ];
+   nc[ d.obj_idx[ k ] ] += dir[ d.grad_idx[ k ] ];
 
   if( d.dq )
    d.dq->modify_linear_coefficients( std::move( nc ) ,
@@ -649,8 +1292,6 @@ void FrankWolfeSolver::scatter( void )
   else
    d.lin->modify_coefficients( std::move( nc ) , Function::Range( 0 , n ) );
   }
-
- f_modified = true;
  }
 
 /*--------------------------------------------------------------------------*/
@@ -697,15 +1338,19 @@ void FrankWolfeSolver::run_LMOs( bool changedvars )
   chunk();                                // the main thread participates
   for( auto & th : pool )
    th.join();
-
-  // re-throw (in the main thread) the first exception, if any
-  for( auto & d : v_sb )
-   if( d.excp ) {
-    auto e = d.excp;
-    d.excp = nullptr;
-    std::rethrow_exception( e );
-    }
   }
+
+ // re-throw (in the main thread) the first exception, if any, on either
+ // path, forgetting the others so that the next call does not see them
+ std::exception_ptr first;
+ for( auto & d : v_sb )
+  if( d.excp ) {
+   if( ! first )
+    first = d.excp;
+   d.excp = nullptr;
+   }
+ if( first )
+  std::rethrow_exception( first );
 
  // a sub-Block whose (relaxed) feasible region is empty makes the product
  // region -- hence the father -- infeasible
@@ -990,6 +1635,12 @@ int FrankWolfeSolver::compute( bool changedvars )
  if( ! f_Block )
   throw( std::logic_error( "FrankWolfeSolver::compute: no Block registered" ) );
 
+ // the parameters are checked before anything is locked, so that a refusal
+ // leaves the Solver and the Block as they were
+ if( ( f_init_point == eInitBlock ) && ( f_algorithm != AlgVanilla ) )
+  throw( std::invalid_argument( "FrankWolfeSolver::compute: intInitPoint "
+                                "eInitBlock needs intAlgorithm AlgVanilla" ) );
+
  // lock the Solver against concurrent compute() from other threads: every
  // Solver has an internal recursive mutex (see Solver::lock()). It is released
  // before every return below (and in the catch).
@@ -1003,21 +1654,30 @@ int FrankWolfeSolver::compute( bool changedvars )
   return( kBlockLocked );
   }
 
- // process any Modification arrived from the sub-Block since the last
- // compute() (lazily), possibly rebuilding the cached structure, *before*
- // acquiring the LMO (a structural change rebuilds v_sb)
- process_modifications();
+ // what follows may throw with the Solver and the Block locked: they are
+ // unlocked before the exception goes out
+ try {
+  // process any Modification arrived from the sub-Block since the last
+  // compute() (lazily), possibly rebuilding the cached structure, *before*
+  // acquiring the LMO (a structural change rebuilds v_sb)
+  process_modifications();
 
- acquire_LMOs();
+  acquire_LMOs();
 
- // LMOLinear requires purely linear sub-Block objectives (no quadratic term
- // to keep in the oracle); use LMOQuad/LMOFull otherwise
-
- if( f_lmo_obj == LMOLinear )
-  for( auto & d : v_sb )
-   if( d.dq )
-    throw( std::logic_error( "FrankWolfeSolver: LMOLinear requires "
-     "LinearFunction sub-Block objectives; use LMOQuad/LMOFull otherwise" ) );
+  // LMOLinear requires purely linear sub-Block objectives (no quadratic
+  // term to keep in the oracle); use LMOQuad/LMOFull otherwise
+  if( f_lmo_obj == LMOLinear )
+   for( auto & d : v_sb )
+    if( d.dq )
+     throw( std::logic_error( "FrankWolfeSolver: LMOLinear requires "
+      "LinearFunction sub-Block objectives; use LMOQuad/LMOFull otherwise" ) );
+  }
+ catch( ... ) {
+  if( ! owned )
+   f_Block->unlock( f_id );
+  unlock();
+  throw;
+  }
 
  // inhibit while running: the scatter() (and the final restore_objectives())
  // change the sub-Block objectives, which are "self-inflicted" Modification to
@@ -1025,14 +1685,47 @@ int FrankWolfeSolver::compute( bool changedvars )
  // drops new incoming ones)
  inhibit_Modification( true );
 
+ // every iteration rewrites the linear costs of all the sub-Block
+ // Objectives, and restore_objectives() sets them back at the end. The
+ // Modification are needed by the sub-Block themselves (which may translate
+ // them into their physical data) and by their Solver, the LMO first, but
+ // not by the other Solver of the father and of its ancestors: the net
+ // change for them is none, and a Solver that does not compute meanwhile
+ // would only pile them up. Hence the father gets a channel of its own as
+ // default one while the method runs: the Modification of the sub-Block
+ // reach the sub-Block and its Solver as before, and stop in the channel,
+ // which scatter() empties each time and which is discarded at the end if
+ // the costs are those at the beginning, or else shipped with the last
+ // Modification, which bring the others to the state of the Block. The
+ // guard closes it on every way out of the method, exceptions comprised.
+ struct ChannelGuard {
+  FrankWolfeSolver * fw;
+  ~ChannelGuard() {
+   try { fw->close_father_channel(); }
+   catch( ... ) {}
+   }
+  } guard{ this };
+
+ f_n_accepted = f_n_rejected = f_n_corrected = 0;
+ f_best_bound = f_max ? Inf< OFValue >() : - Inf< OFValue >();
+
+ // the pieces kept from a previous compute() are linearizations of the
+ // linking function as it was then, which a Modification may have changed
+ // since: below it no more, they would give a direction and a bound that
+ // are not valid, and they are dropped
+ f_pgrad.clear();
+ f_agg.clear();
+
  int status;
  try {
+  open_father_channel();
   status = ( f_algorithm == AlgVanilla ) ? compute_vanilla( changedvars )
                                          : compute_active_set( changedvars );
   }
  catch( ... ) {
   if( f_modified )
    restore_objectives( false );
+  close_father_channel();
   inhibit_Modification( false );
   if( ! owned )
    f_Block->unlock( f_id );
@@ -1042,9 +1735,10 @@ int FrankWolfeSolver::compute( bool changedvars )
 
  // leave the Block pristine between two solves: undo the last scatter so any
  // external change to the sub-Block objectives is "clean" (issued normally, so
- // the bridge / the other :Solver are notified; ignored by us, being inhibited)
+ // the bridge and the LMO are notified; ignored by us, being inhibited)
  if( f_modified )
   restore_objectives( false );
+ close_father_channel();
  inhibit_Modification( false );
 
  if( ! owned )
@@ -1058,6 +1752,12 @@ int FrankWolfeSolver::compute( bool changedvars )
          << ", gap " << f_last_gap << ", status " << status;
   if( f_algorithm != AlgVanilla )
    *f_log << ", |A| " << f_aset.size();
+  if( f_n_accepted + f_n_rejected ) {
+   *f_log << ", directions " << f_n_accepted << " taken and "
+          << f_n_rejected << " refused";
+   if( f_n_corrected )
+    *f_log << " (" << f_n_corrected << " corrected)";
+   }
   *f_log << std::endl;
   }
 
@@ -1078,6 +1778,18 @@ int FrankWolfeSolver::run_event( int type )
    return( res );
   }
  return( eContinue );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+Solver::OFValue FrankWolfeSolver::stab_weight( void ) const
+{
+ // how much the master problem is stabilized. A dblFWt of its own is taken as
+ // it is; a negative one says to take it from the problem, i.e. from the
+ // strong convexity of the father, which for a quadratic objective is the
+ // smallest eigenvalue of its Hessian [see analyze_father()]. That may be 0,
+ // and then there is no stabilization and the direction is the gradient
+ return( f_t < 0 ? f_t_auto : f_t );
  }
 
 /*--------------------------------------------------------------------------*/
@@ -1153,6 +1865,12 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   return( std::chrono::duration< double >(
            std::chrono::steady_clock::now() - t_start ).count() ); };
 
+ // whether a gap is small enough to stop, against dblRelAcc and dblAbsAcc
+ auto small_gap = [ this ]( OFValue gap ) {
+  return( ( gap <= f_rel_acc * std::max( OFValue( 1 ) ,
+                                         std::abs( f_value ) ) ) ||
+          ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ); };
+
  const Index G = Index( f_grad.size() );
 
  // <grad f_father(x), val> over the father active variables
@@ -1160,6 +1878,20 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   OFValue s = 0;
   for( Index p = 0 ; p < G ; ++p )
    s += f_grad[ p ] * val[ p ];
+  return( s ); };
+
+ /* The same with what the oracle has actually been given, which is the
+  * gradient unless a direction has been built out of more than it: the
+  * objectives the oracle minimizes carry that vector, so the values it
+  * reports are in those units, and taking them out is what leaves the cost
+  * of the sub-Block alone. With the gradient the two coincide and nothing
+  * changes [see bundle_direction()]. */
+
+ auto dir_dot = [ this , G ]( const std::vector< FunctionValue > & val ) {
+  const auto & dir = p_dir ? *p_dir : f_grad;
+  OFValue s = 0;
+  for( Index p = 0 ; p < G ; ++p )
+   s += dir[ p ] * val[ p ];
   return( s ); };
 
  // initialization. Warm start: if a previous compute() left a (still feasible)
@@ -1179,8 +1911,22 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    cbar += d.fun->get_value();
    }
   }
+ else
+  if( f_init_point == eInitBlock ) {
+   // the current values of the Variable are the starting point, and the
+   // sub-Block cost there is what the convex combination starts from
+   delete f_x;
+   f_x = f_Block->get_Solution( nullptr , false );
+   cbar = 0;
+   for( auto & d : v_sb ) {
+    d.fun->compute( true );
+    cbar += d.fun->get_value();
+    }
+   f_has_sol = true;
+   }
  else {
   evaluate_gradient();
+  p_dir = & f_grad;          // nothing recorded yet: this is the gradient
   scatter();
   run_LMOs( true );
   if( f_lmo_infeas ) { f_has_sol = false; return( kInfeasible ); }
@@ -1217,30 +1963,100 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   f_x->write( f_Block );
   evaluate_gradient();
   OFValue father_val = f_fun->get_value();
-  scatter();
-
-  OFValue mx_sum = eval_modified_objective();   // sum_j M_j(x_j)
   capture_father_values( f_xval );
+  bundle_direction( father_val );
 
-  run_LMOs( true );
+  /* The oracle is asked with the direction, and asked again with the
+   * gradient if the step towards the vertex it gives does not keep the
+   * fraction dblFWAccept of the bound the direction gives, unless that bound
+   * is already small enough to stop [see the class documentation]. */
+
+  OFValue mx_sum , mv_sum , cv , gx , cost_x , gap;
+  bool corrected = false;
+  for( ; ; ) {
+   scatter();
+   mx_sum = eval_modified_objective();           // sum_j M_j(x_j)
+
+   run_LMOs( true );
+   if( f_lmo_infeas )
+    break;
+   mv_sum = 0;
+   for( auto & d : v_sb )
+    mv_sum += d.value;                            // sum_j M_j(v_j)
+   capture_father_values( f_vval );
+
+   gx = grad_dot( f_xval );               // <grad f_father(x), x>
+   cv = mv_sum - dir_dot( f_vval );       // sum_j h_j(v_j)
+
+   // the two quantities as the oracle has them, i.e. priced with the
+   // direction it was given: these are what the bound is built out of [see
+   // below], while the value and the line search want the gradient
+   const OFValue dx = dir_dot( f_xval );
+   const OFValue mv_dir = mv_sum;                 // min over X of <z*,.> + h
+   const OFValue mx_dir = mx_sum;                 // <z*,x> + h(x)
+
+   // what the value and the line search need is the vertex priced with the
+   // gradient, whatever the oracle has been given to find it
+   mv_sum = cv + grad_dot( f_vval );
+   if( ! cvx )
+    mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
+
+   // cost_x = <grad f_father, x> + ( sub-Block cost at x ): in (P2) the latter
+   // is the tracked convex combination cbar; in (P1) it is re-evaluated, i.e.
+   // mx_sum - gx, so cost_x = mx_sum. Everything (value, gap, line search) is
+   // then identical to the linear case with mx_sum replaced by cost_x.
+   cost_x = cvx ? ( gx + cbar ) : mx_sum;
+
+   f_value = father_val + ( cost_x - gx );
+
+   /* The bound, whatever direction the oracle has been given. z* is a
+    * sigma*-subgradient of the linking function at the current iterate, i.e.
+    *
+    *   f( y ) >= f( x ) + < z* , y - x > - sigma*   for every y ,
+    *
+    * so minimizing < z* , . > over the feasible set bounds the optimum from
+    * below once < z* , x > and sigma* are put in, and the quantity below is
+    * a valid gap. With the gradient it is the classical one, z* being the
+    * gradient and sigma* zero [see bundle_direction()]. */
+
+   OFValue cost_x_dir = cvx ? ( dx + cbar ) : mx_dir;
+   gap = f_max ? ( mv_dir - cost_x_dir + f_sigma )
+               : ( cost_x_dir - mv_dir + f_sigma );
+   f_bound = f_max ? ( f_value + gap ) : ( f_value - gap );
+
+   // the bound of this trial, and the one the tests use: with intFWBestLB
+   // the best found so far, which this trial may improve
+   const OFValue cert = gap;
+   if( f_use_best ) {
+    if( f_max ? ( f_bound < f_best_bound ) : ( f_bound > f_best_bound ) )
+     f_best_bound = f_bound;
+    f_bound = f_best_bound;
+    gap = f_max ? ( f_best_bound - f_value ) : ( f_value - f_best_bound );
+    }
+
+   if( ( f_accept <= 0 ) || ( p_dir == & f_grad ) || small_gap( gap ) )
+    break;
+
+   // the decrease the gradient promises along the step towards the vertex
+   const OFValue dec = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+   if( dec >= f_accept * gap ) {
+    ++f_n_accepted;
+    break;
+    }
+
+   // refused: corrected once, if intFWOnReject asks for it and the direction
+   // still decreases the function, else the gradient
+   ++f_n_rejected;
+   if( ( ! corrected ) && correct_direction( dec , cert ) ) {
+    corrected = true;
+    continue;
+    }
+   p_dir = & f_grad;
+   f_sigma = 0;
+   }
+
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
-  OFValue mv_sum = 0;
-  for( auto & d : v_sb )
-   mv_sum += d.value;                            // sum_j M_j(v_j)
-  capture_father_values( f_vval );
 
-  OFValue gx = grad_dot( f_xval );               // <grad f_father(x), x>
-  OFValue cv = mv_sum - grad_dot( f_vval );      // sum_j h_j(v_j)
-
-  // cost_x = <grad f_father, x> + ( sub-Block cost at x ): in (P2) the latter
-  // is the tracked convex combination cbar; in (P1) it is re-evaluated, i.e.
-  // mx_sum - gx, so cost_x = mx_sum. Everything (value, gap, line search) is
-  // then identical to the linear case with mx_sum replaced by cost_x.
-  OFValue cost_x = cvx ? ( gx + cbar ) : mx_sum;
-
-  f_value = father_val + ( cost_x - gx );
-  OFValue gap = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
-  f_bound = f_max ? ( f_value + gap ) : ( f_value - gap );
   f_niter = t; f_last_gap = gap;             // for the final-summary log
 
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
@@ -1250,11 +2066,16 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
   if( ( gap <= rel_thr ) ||
       ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ) {
-   // eBeforeTermination: a handler may veto the optimality stop (eForceContinue)
-   int ev = run_event( eBeforeTermination );
-   if( ev != eForceContinue ) {
-    status = ( ev == eStopError ) ? kError : kOK;
-    break;
+
+
+   if( ( gap <= rel_thr ) ||
+       ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ) {
+    // eBeforeTermination: a handler may veto the optimality stop
+    int ev = run_event( eBeforeTermination );
+    if( ev != eForceContinue ) {
+     status = ( ev == eStopError ) ? kError : kOK;
+     break;
+     }
     }
    }
 
@@ -1270,7 +2091,10 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
             ? OFValue( 1 ) : OFValue( 0 );
    }
   else
-   gamma = OFValue( 2 ) / OFValue( t + 2 );      // Agnostic open-loop rule
+   if( f_line_search == LSFixed )
+    gamma = f_step;
+   else
+    gamma = OFValue( 2 ) / OFValue( t + 2 );     // Agnostic open-loop rule
 
   // x <- ( 1 - gamma ) x + gamma v ; cbar <- ( 1 - gamma ) cbar + gamma cv
   Solution * v_sol = f_Block->get_Solution( nullptr , false );
@@ -1314,6 +2138,12 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   return( std::chrono::duration< double >(
            std::chrono::steady_clock::now() - t_start ).count() ); };
 
+ // whether a gap is small enough to stop, against dblRelAcc and dblAbsAcc
+ auto small_gap = [ this ]( OFValue gap ) {
+  return( ( gap <= f_rel_acc * std::max( OFValue( 1 ) ,
+                                         std::abs( f_value ) ) ) ||
+          ( std::isfinite( f_abs_acc ) && ( gap <= f_abs_acc ) ) ); };
+
  const Index G = Index( f_grad.size() );
  const double drop_eps = 1e-9;
 
@@ -1322,6 +2152,17 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   OFValue s = 0;
   for( Index p = 0 ; p < G ; ++p )
    s += f_grad[ p ] * val[ p ];
+  return( s ); };
+
+ // the same with what the oracle has actually been given, which is the
+ // gradient unless a direction has been built out of more than it: the
+ // vertex it reports is priced in those units, and taking them out leaves
+ // the cost of the sub-Block alone [see bundle_direction()]
+ auto dir_dot = [ this , G ]( const std::vector< FunctionValue > & val ) {
+  const auto & dir = p_dir ? *p_dir : f_grad;
+  OFValue s = 0;
+  for( Index p = 0 ; p < G ; ++p )
+   s += dir[ p ] * val[ p ];
   return( s ); };
 
  // initialization: a first LMO gives x0 = v0; active set = { ( v0 , 1 ) }.
@@ -1376,63 +2217,130 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   f_x->write( f_Block );
   evaluate_gradient();
   OFValue father_val = f_fun->get_value();
-  scatter();
-  OFValue mx_sum = eval_modified_objective();    // <grad F, x>
   capture_father_values( f_xval );
+  bundle_direction( father_val );
 
-  // away vertex: the active-set atom a maximizing (minimizing, if eMax) the
-  // (modified) objective <grad F, a>, the "worst" atom we want to move weight
-  // away from. La_i = sum_j M_j(a_i) = <grad f_father(x), a_i> + c_i, where
-  // c_i = f_ci is the x-INDEPENDENT part sum_j[ alpha <c_j,a_ij> + beta q_j(a_ij) ]
-  // (the quadratic part included): so the cheap cached dot product is exact, not
-  // just for linear children, but also (i) for any *vertex* atom (where c_i is
-  // the cost at the vertex) and (ii) in eObjCvxComb (P2) mode, where the value
-  // model is itself cbar = sum_i lambda_i c_i, so the convex-combination cost of
-  // an *aggregate* atom is exactly its f_ci. Only the eObjAtX (P1) mode with
-  // quadratic children and aggregate atoms needs the atom written and re-evaluated
-  // at its (fractional) point; everything else uses the O(G) cached form.
-  const bool cached_argmax = all_lin || cvx;
-  Index a_idx = 0;
-  OFValue La_a = f_max ? Inf< OFValue >() : - Inf< OFValue >();
-  for( Index i = 0 ; i < f_aset.size() ; ++i ) {
-   OFValue La;
-   if( cached_argmax )
-    La = grad_dot( f_aset[ i ].f_val ) + f_aset[ i ].f_ci;
-   else {
-    f_aset[ i ].f_sol->write( f_Block );
-    La = eval_modified_objective();
+  // the oracle is asked with the direction, and asked again with the
+  // gradient if the step towards its vertex does not pass the test of
+  // dblFWAccept [see the same in the vanilla loop]; the away atom is chosen
+  // before each call, which writes the atoms into the Block
+  OFValue mx_sum , mv_sum , gx , cost_x , fw_gap , away_gap , La_a;
+  Index a_idx;
+  double lambda_a;
+  bool corrected = false;
+  for( ; ; ) {
+   scatter();
+   mx_sum = eval_modified_objective();           // <grad F, x>
+
+   // away vertex: the active-set atom a maximizing (minimizing, if eMax) the
+   // (modified) objective <grad F, a>, the "worst" atom we want to move weight
+   // away from. La_i = sum_j M_j(a_i) = <grad f_father(x), a_i> + c_i, where
+   // c_i = f_ci is the x-INDEPENDENT part sum_j[ alpha <c_j,a_ij> + beta
+   // q_j(a_ij) ] (the quadratic part included): so the cheap cached dot
+   // product is exact, not just for linear children, but also (i) for any
+   // *vertex* atom (where c_i is the cost at the vertex) and (ii) in
+   // eObjCvxComb (P2) mode, where the value model is itself cbar = sum_i
+   // lambda_i c_i, so the convex-combination cost of an *aggregate* atom is
+   // exactly its f_ci. Only the eObjAtX (P1) mode with quadratic children and
+   // aggregate atoms needs the atom written and re-evaluated at its
+   // (fractional) point; everything else uses the O(G) cached form.
+   const bool cached_argmax = all_lin || cvx;
+   a_idx = 0;
+   La_a = f_max ? Inf< OFValue >() : - Inf< OFValue >();
+   for( Index i = 0 ; i < f_aset.size() ; ++i ) {
+    OFValue La;
+    if( cached_argmax )
+     La = grad_dot( f_aset[ i ].f_val ) + f_aset[ i ].f_ci;
+    else {
+     f_aset[ i ].f_sol->write( f_Block );
+     La = eval_modified_objective();
+     }
+    if( f_max ? ( La < La_a ) : ( La > La_a ) ) {
+     La_a = La;
+     a_idx = i;
+     }
     }
-   if( f_max ? ( La < La_a ) : ( La > La_a ) ) {
-    La_a = La;
-    a_idx = i;
+   lambda_a = f_aset[ a_idx ].f_weight;
+   a_val = f_aset[ a_idx ].f_val;   // away-atom father values (stored)
+
+   // FW vertex: the LMO of grad F
+   run_LMOs( true );
+   if( f_lmo_infeas )
+    break;
+   mv_sum = 0;
+   for( auto & d : v_sb )
+    mv_sum += d.value;                            // <grad F, v>
+   capture_father_values( f_vval );
+
+   // F(x) and the Frank-Wolfe gap (valid optimality bound). cost_x replaces
+   // mx_sum: in (P2) the sub-Block cost at x is the convex combination cbar of
+   // the atom costs ( cost_x = gx + cbar ); in (P1) it is mx_sum ( = gx + cost
+   // re-evaluated at x ). The two coincide for linear sub-Block objectives.
+   // the two quantities as the oracle has them, i.e. priced with the
+   // direction it was given: these are what the bound is built out of [see
+   // the same in the vanilla loop], while the value, the away atom and the
+   // line search want the gradient
+   const OFValue dx = dir_dot( f_xval );
+   const OFValue mv_dir = mv_sum;                 // min over X of <z*,.> + h
+   const OFValue mx_dir = mx_sum;                 // <z*,x> + h(x)
+
+   // whatever the oracle has been given to find the vertex, what the value
+   // and the line search need is the vertex priced with the gradient
+   mv_sum += grad_dot( f_vval ) - dir_dot( f_vval );
+   if( ! cvx )
+    mx_sum += grad_dot( f_xval ) - dir_dot( f_xval );
+
+   gx = grad_dot( f_xval );               // <grad f_father(x), x>
+   OFValue cbar = 0;
+   if( cvx )
+    for( const auto & el : f_aset )
+     cbar += el.f_weight * el.f_ci;               // sum_i lambda_i h(atom_i)
+   cost_x = cvx ? ( gx + cbar ) : mx_sum;
+
+   f_value = father_val + ( cost_x - gx );
+
+   // the bound out of z* and sigma*, whatever the direction [see the vanilla
+   // loop for why this is valid]; the away gap stays on the gradient, the
+   // atom to take weight away from being chosen with it
+   OFValue cost_x_dir = cvx ? ( dx + cbar ) : mx_dir;
+   fw_gap   = f_max ? ( mv_dir - cost_x_dir + f_sigma )
+                    : ( cost_x_dir - mv_dir + f_sigma );
+   away_gap = f_max ? ( cost_x - La_a )   : ( La_a - cost_x );
+   f_bound = f_max ? ( f_value + fw_gap ) : ( f_value - fw_gap );
+
+   // the bound of this trial, and the one the tests use: with intFWBestLB
+   // the best found so far, which this trial may improve
+   const OFValue cert = fw_gap;
+   if( f_use_best ) {
+    if( f_max ? ( f_bound < f_best_bound ) : ( f_bound > f_best_bound ) )
+     f_best_bound = f_bound;
+    f_bound = f_best_bound;
+    fw_gap = f_max ? ( f_best_bound - f_value ) : ( f_value - f_best_bound );
     }
+
+   if( ( f_accept <= 0 ) || ( p_dir == & f_grad ) || small_gap( fw_gap ) )
+    break;
+
+   // the decrease the gradient promises along the step towards the vertex
+   const OFValue dec = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+   if( dec >= f_accept * fw_gap ) {
+    ++f_n_accepted;
+    break;
+    }
+
+   // refused: corrected once, if intFWOnReject asks for it and the direction
+   // still decreases the function, else the gradient
+   ++f_n_rejected;
+   if( ( ! corrected ) && correct_direction( dec , cert ) ) {
+    corrected = true;
+    continue;
+    }
+   p_dir = & f_grad;
+   f_sigma = 0;
    }
-  double lambda_a = f_aset[ a_idx ].f_weight;
-  a_val = f_aset[ a_idx ].f_val;   // away-atom father values (stored)
 
-  // FW vertex: the LMO of grad F
-  run_LMOs( true );
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
-  OFValue mv_sum = 0;
-  for( auto & d : v_sb )
-   mv_sum += d.value;                            // <grad F, v>
-  capture_father_values( f_vval );
 
-  // F(x) and the Frank-Wolfe gap (valid optimality bound). cost_x replaces
-  // mx_sum: in (P2) the sub-Block cost at x is the convex combination cbar of
-  // the atom costs ( cost_x = gx + cbar ); in (P1) it is mx_sum ( = gx + cost
-  // re-evaluated at x ). The two coincide for linear sub-Block objectives.
-  OFValue gx = grad_dot( f_xval );               // <grad f_father(x), x>
-  OFValue cbar = 0;
-  if( cvx )
-   for( const auto & el : f_aset )
-    cbar += el.f_weight * el.f_ci;               // sum_i lambda_i h(atom_i)
-  OFValue cost_x = cvx ? ( gx + cbar ) : mx_sum;
-
-  f_value = father_val + ( cost_x - gx );
-  OFValue fw_gap   = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
-  OFValue away_gap = f_max ? ( cost_x - La_a )   : ( La_a - cost_x );
-  f_bound = f_max ? ( f_value + fw_gap ) : ( f_value - fw_gap );
   f_niter = t; f_last_gap = fw_gap;          // for the final-summary log
 
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
@@ -1440,6 +2348,8 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
           << ", |A| " << f_aset.size() << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
+
+
   if( ( fw_gap <= rel_thr ) ||
       ( std::isfinite( f_abs_acc ) && ( fw_gap <= f_abs_acc ) ) ) {
    // eBeforeTermination: a handler may veto the optimality stop (eForceContinue)
@@ -1491,7 +2401,9 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
             ? OFValue( gamma_max ) : OFValue( 0 );
    }
   else
-   gamma = std::min( OFValue( gamma_max ) , OFValue( 2 ) / OFValue( t + 2 ) );
+   gamma = std::min( OFValue( gamma_max ) ,
+                     f_line_search == LSFixed ? OFValue( f_step )
+                     : OFValue( 2 ) / OFValue( t + 2 ) );
 
   // apply the step: update the iterate and the active set - - - - - - - - - -
 
