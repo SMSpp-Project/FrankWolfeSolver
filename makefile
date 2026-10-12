@@ -10,12 +10,12 @@
 #   the :Solver used for comparison) are obtained through the Solver         #
 #   factory and the CDASolver interface, hence they are not compile-time     #
 #   dependencies (exactly as for LagrangianDualSolver and its inner          #
-#   Solver).                                                                  #
+#   Solver).                                                                 #
 #                                                                            #
 #   Note that, conversely, $(SMS++INC) is also assumed to include any        #
 #   -I directive corresponding to external libraries needed by SMS++, at     #
 #   least to the extent in which they are needed by the parts of SMS++       #
-#   used by FrankWolfeSolver.                                                 #
+#   used by FrankWolfeSolver.                                                #
 #                                                                            #
 #   Input:  $(CC)          = compiler command                                #
 #           $(SW)          = compiler options                                #
