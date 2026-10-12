@@ -21,8 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the gradient after a refusal), how many calls to the oracle have been made
   so far, how many pieces of the master have a positive weight, the step,
   its norm and its cosine with the previous one in the father `Variable`;
-  the final summary also says how many calls to the
-  oracle have been made
+  the final summary also says how many calls to the oracle have been made
+
+### Changed
+
+- the values in the log have 12 significant digits, the precision of the
+  stream being given back at the end of `compute()`: with the default 6 two
+  runs that differ by less than one part in a million looked the same
 
 ### Fixed
 
@@ -31,12 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer linearizations of the linking function, and the direction and the
   bound they gave not valid; they are now dropped at every `compute()`, as
   those of `eDirBundle` and `eDirAggregate` already were
-
-### Changed
-
-- the values in the log have 12 significant digits, the precision of the
-  stream being given back at the end of `compute()`: with the default 6 two
-  runs that differ by less than one part in a million looked the same
 
 ## [0.3.0] - 2026-10-09
 
