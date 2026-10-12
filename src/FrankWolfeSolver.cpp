@@ -1298,6 +1298,8 @@ void FrankWolfeSolver::scatter( void )
 
 void FrankWolfeSolver::run_LMOs( bool changedvars )
 {
+ ++f_n_lmo;
+
  // run one LMO ( solve + materialize the vertex into the sub-Block variables )
  auto run_one = [ changedvars ]( SubBlockData & d ) {
   try {
@@ -1706,7 +1708,16 @@ int FrankWolfeSolver::compute( bool changedvars )
    }
   } guard{ this };
 
- f_n_accepted = f_n_rejected = f_n_corrected = 0;
+ // the values in the log with all the digits that tell two runs apart, the
+ // precision the stream had being given back on every way out of the method
+ struct PrecisionGuard {
+  std::ostream * log;
+  std::streamsize prec;
+  ~PrecisionGuard() { if( log ) log->precision( prec ); }
+  } pguard{ f_log , f_log ? f_log->precision( 12 ) : 0 };
+
+ f_n_accepted = f_n_rejected = f_n_corrected = f_n_lmo = 0;
+ f_last_step.clear();
  f_best_bound = f_max ? Inf< OFValue >() : - Inf< OFValue >();
 
  // the pieces kept from a previous compute() are linearizations of the
@@ -1758,6 +1769,7 @@ int FrankWolfeSolver::compute( bool changedvars )
    if( f_n_corrected )
     *f_log << " (" << f_n_corrected << " corrected)";
    }
+  *f_log << ", LMO " << f_n_lmo;
   *f_log << std::endl;
   }
 
@@ -1972,7 +1984,12 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    * is already small enough to stop [see the class documentation]. */
 
   OFValue mx_sum , mv_sum , cv , gx , cost_x , gap;
+  // what the step is taken along, for the per-iteration log: 'G' the
+  // gradient, 'B' the direction of the master, 'C' the same corrected, 'F'
+  // the gradient the oracle has been asked again with after a refusal
+  const bool master_grad = ( p_dir == & f_grad );
   bool corrected = false;
+  bool fell_back = false;
   for( ; ; ) {
    scatter();
    mx_sum = eval_modified_objective();           // sum_j M_j(x_j)
@@ -2053,15 +2070,18 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
     }
    p_dir = & f_grad;
    f_sigma = 0;
+   fell_back = true;
    }
 
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
 
   f_niter = t; f_last_gap = gap;             // for the final-summary log
 
+  const char dir_kind = fell_back ? 'F' : corrected ? 'C'
+                       : ( master_grad || is_gradient( *p_dir ) ) ? 'G' : 'B';
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
    *f_log << "  FW it " << t << ": value " << f_value << ", gap " << gap
-          << std::endl;
+          << ", dir " << dir_kind << ", LMO " << f_n_lmo << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
   if( ( gap <= rel_thr ) ||
@@ -2095,6 +2115,9 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
     gamma = f_step;
    else
     gamma = OFValue( 2 ) / OFValue( t + 2 );     // Agnostic open-loop rule
+
+  if( f_log && ( f_log_verb >= 2 ) )         // x_{k+1} - x_k = gamma ( v - x )
+   log_step( gamma , f_vval , f_xval );
 
   // x <- ( 1 - gamma ) x + gamma v ; cbar <- ( 1 - gamma ) cbar + gamma cv
   Solution * v_sol = f_Block->get_Solution( nullptr , false );
@@ -2227,7 +2250,12 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   OFValue mx_sum , mv_sum , gx , cost_x , fw_gap , away_gap , La_a;
   Index a_idx;
   double lambda_a;
+  // what the step is taken along, for the per-iteration log: 'G' the
+  // gradient, 'B' the direction of the master, 'C' the same corrected, 'F'
+  // the gradient the oracle has been asked again with after a refusal
+  const bool master_grad = ( p_dir == & f_grad );
   bool corrected = false;
+  bool fell_back = false;
   for( ; ; ) {
    scatter();
    mx_sum = eval_modified_objective();           // <grad F, x>
@@ -2337,15 +2365,19 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
     }
    p_dir = & f_grad;
    f_sigma = 0;
+   fell_back = true;
    }
 
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
 
   f_niter = t; f_last_gap = fw_gap;          // for the final-summary log
 
+  const char dir_kind = fell_back ? 'F' : corrected ? 'C'
+                       : ( master_grad || is_gradient( *p_dir ) ) ? 'G' : 'B';
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
    *f_log << "  FW it " << t << ": value " << f_value << ", gap " << fw_gap
-          << ", |A| " << f_aset.size() << std::endl;
+          << ", |A| " << f_aset.size() << ", dir " << dir_kind
+          << ", LMO " << f_n_lmo << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
 
@@ -2404,6 +2436,9 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
    gamma = std::min( OFValue( gamma_max ) ,
                      f_line_search == LSFixed ? OFValue( f_step )
                      : OFValue( 2 ) / OFValue( t + 2 ) );
+
+  if( f_log && ( f_log_verb >= 2 ) )         // x_{k+1} - x_k = - gamma d
+   log_step( gamma , *dfrom , *dto );
 
   // apply the step: update the iterate and the active set - - - - - - - - - -
 
@@ -2467,6 +2502,52 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
 
 /*--------------------------------------------------------------------------*/
 /*---------------------- READING THE SOLUTION ------------------------------*/
+/*--------------------------------------------------------------------------*/
+
+bool FrankWolfeSolver::is_gradient( const std::vector< FunctionValue > & dir )
+ const
+{
+ // the master may give the gradient itself, e.g., when all its weight is on
+ // the current cut: it is told apart up to the round-off of the master
+ if( dir.size() != f_grad.size() )
+  return( false );
+ double ng = 0 , nd = 0;
+ for( Index i = 0 ; i < dir.size() ; ++i ) {
+  ng = std::max( ng , double( std::abs( f_grad[ i ] ) ) );
+  nd = std::max( nd , double( std::abs( dir[ i ] - f_grad[ i ] ) ) );
+  }
+ return( nd <= 1e-9 * std::max( ng , 1.0 ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::log_step( OFValue gamma ,
+                                 const std::vector< FunctionValue > & from ,
+                                 const std::vector< FunctionValue > & to )
+{
+ // the step is gamma ( from - to ) in the father Variable, and its cosine
+ // with the previous one tells how much the iterates zig-zag; a null step
+ // has no cosine, and it is not the previous one of the next step
+ std::vector< FunctionValue > step( from.size() );
+ double nn = 0 , np = 0 , dp = 0;
+ for( Index i = 0 ; i < step.size() ; ++i ) {
+  step[ i ] = gamma * ( from[ i ] - to[ i ] );
+  nn += step[ i ] * step[ i ];
+  }
+ *f_log << "    step " << gamma << ", |d| " << std::sqrt( nn );
+ if( nn > 0 ) {
+  if( f_last_step.size() == step.size() ) {
+   for( Index i = 0 ; i < step.size() ; ++i ) {
+    np += f_last_step[ i ] * f_last_step[ i ];
+    dp += f_last_step[ i ] * step[ i ];
+    }
+   *f_log << ", cos " << dp / std::sqrt( nn * np );
+   }
+  f_last_step = std::move( step );
+  }
+ *f_log << std::endl;
+ }
+
 /*--------------------------------------------------------------------------*/
 
 Solver::OFValue FrankWolfeSolver::get_var_value( void ) { return( f_value ); }

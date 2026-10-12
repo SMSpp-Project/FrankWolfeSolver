@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- the per-iteration log (`intLogVerb` 2) also says what the step is taken
+  along (the gradient, the direction of the master, the same corrected, or
+  the gradient after a refusal), how many calls to the oracle have been made
+  so far, the step, its norm and its cosine with the previous one in the
+  father `Variable`; the final summary also says how many calls to the
+  oracle have been made
+
+### Changed
+
+- the values in the log have 12 significant digits, the precision of the
+  stream being given back at the end of `compute()`: with the default 6 two
+  runs that differ by less than one part in a million looked the same
+
 ## [0.3.0] - 2026-10-09
 
 ### Added

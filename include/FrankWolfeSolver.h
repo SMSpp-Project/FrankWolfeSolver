@@ -922,6 +922,15 @@ class FrankWolfeSolver : public CDASolver
  /// run all the sub-Block LMO and collect v_j and M_j(v_j) into v_sb
  void run_LMOs( bool changedvars );
 
+ /// tells whether dir is the gradient, up to the round-off of the master
+ bool is_gradient( const std::vector< Function::FunctionValue > & dir ) const;
+
+ /// writes on the log the step gamma ( from - to ) taken in the father
+ /// Variable, its norm and its cosine with the previous one
+ void log_step( OFValue gamma ,
+                const std::vector< Function::FunctionValue > & from ,
+                const std::vector< Function::FunctionValue > & to );
+
  /// vanilla Frank-Wolfe loop (no active set)
  int compute_vanilla( bool changedvars );
 
@@ -1019,6 +1028,11 @@ class FrankWolfeSolver : public CDASolver
  Index f_n_accepted = 0;   ///< bundle directions taken in the last compute()
  Index f_n_rejected = 0;   ///< bundle directions refused in the last compute()
  Index f_n_corrected = 0;  ///< refused directions corrected [intFWOnReject]
+ Index f_n_lmo = 0;        ///< calls to the LMOs in the last compute()
+
+ /// father values of the last step x_{k+1} - x_k, for the cosine of two
+ /// consecutive steps in the per-iteration log (intLogVerb 2)
+ std::vector< Function::FunctionValue > f_last_step;
 
  // problem structure - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
