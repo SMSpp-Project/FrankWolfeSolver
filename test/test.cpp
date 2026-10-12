@@ -507,7 +507,8 @@ bool check_fixed_step( void )
  // the integer parameters of the bundle directions refuse what is out
  for( auto [ name , bad ] : std::vector< std::pair< std::string , int > >{
        { "intFWDirection" , 4 } , { "intFWDirection" , -1 } ,
-       { "intFWOnReject" , 2 } , { "intFWBestLB" , 2 } } ) {
+       { "intFWOnReject" , 2 } , { "intFWBestLB" , 2 } ,
+       { "intFWCutPolicy" , 2 } , { "intFWCutPool" , -1 } } ) {
   threw = false;
   try { set_par( fw , name , bad ); }
   catch( std::invalid_argument & ) { threw = true; }

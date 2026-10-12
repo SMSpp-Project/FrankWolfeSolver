@@ -9,12 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `intFWCutPolicy` `eCutRelevant`, with `intFWCutPool` and `intFWCutActive`:
+  the master problem of `eDirBundleMP` is given, out of a pool of pieces,
+  the gradient of the current iterate, the pieces with the largest weights
+  in the previous master and those with the smallest linearization error
+  at the current iterate, the pool keeping the pieces the master is given
+  most often; the default `eCutOldest` keeps the newest pieces, as before
+
 - the per-iteration log (`intLogVerb` 2) also says what the step is taken
   along (the gradient, the direction of the master, the same corrected, or
   the gradient after a refusal), how many calls to the oracle have been made
-  so far, the step, its norm and its cosine with the previous one in the
-  father `Variable`; the final summary also says how many calls to the
+  so far, how many pieces of the master have a positive weight, the step,
+  its norm and its cosine with the previous one in the father `Variable`;
+  the final summary also says how many calls to the
   oracle have been made
+
+### Fixed
+
+- the pieces of the master problem of `eDirBundleMP` were kept from a
+  `compute()` to the next, where a `Modification` may have made them no
+  longer linearizations of the linking function, and the direction and the
+  bound they gave not valid; they are now dropped at every `compute()`, as
+  those of `eDirBundle` and `eDirAggregate` already were
 
 ### Changed
 

@@ -297,6 +297,13 @@ class FrankWolfeSolver : public CDASolver
   };
 
 /*--------------------------------------------------------------------------*/
+ /// which pieces the master problem of eDirBundleMP keeps (intFWCutPolicy)
+ enum cut_policy_type {
+  eCutOldest   = 0 ,  ///< the newest ones, the oldest making room
+  eCutRelevant = 1    ///< the active and the tightest ones, out of a pool
+  };
+
+/*--------------------------------------------------------------------------*/
  /// which Frank-Wolfe variant to run (value of intAlgorithm)
  enum algo_type {
   AlgVanilla  = 0 , ///< vanilla Frank-Wolfe (no active set)
@@ -519,6 +526,37 @@ class FrankWolfeSolver : public CDASolver
    * upper bound, for a maximization): U' <= U, so that the test accepts at
    * least the directions it accepted before and the method may stop sooner,
    * and get_lb() reports f_lb. */
+
+  intFWCutPolicy ,
+  ///< how the pieces of the master problem of eDirBundleMP are chosen
+  /**< One of the cut_policy_type values. With eCutOldest (default) the
+   * master keeps the intFWBundleSize newest pieces, the oldest making room
+   * for the gradient of the current iterate. With eCutRelevant the pieces
+   * are kept in a pool of intFWCutPool of them, and at each iteration the
+   * master is given (i) the gradient of the current iterate, (ii) up to
+   * intFWCutActive of the pieces with the largest weights in the previous
+   * master, and (iii) as many of the others as fit in intFWBundleSize, the
+   * ones with the smallest linearization error at the current iterate
+   * first, i.e. those the master would favour as t goes to 0. When the pool
+   * is full, the piece that goes is, among those that are neither the
+   * current one nor had a positive weight in the previous master, the one
+   * that has been given to the master the fewest times, the oldest if more
+   * than one. Has no effect under the other directions. */
+
+  intFWCutPool ,
+  ///< how many pieces the pool of intFWCutPolicy == eCutRelevant keeps
+  /**< The size of the pool the master problem of eDirBundleMP draws its
+   * pieces from under intFWCutPolicy == eCutRelevant; 0 (default) means
+   * intFWBundleSize, and a value below it is read as it. Has no effect
+   * under eCutOldest. */
+
+  intFWCutActive ,
+  ///< how many pieces with a positive weight eCutRelevant keeps at least
+  /**< The number of pieces with a positive weight in the previous master
+   * problem, the largest first, that intFWCutPolicy == eCutRelevant gives
+   * the master again, the current gradient aside; at most intFWBundleSize
+   * - 1 of them are, and a negative value (default -1) means half of that,
+   * rounded down. Has no effect under eCutOldest. */
 
   intLastParFWSlv  ///< first allowed parameter value for derived classes
   };
@@ -913,6 +951,20 @@ class FrankWolfeSolver : public CDASolver
  void build_master( void );
 
 /*--------------------------------------------------------------------------*/
+ /// drops the MasterProblemBlock of eDirBundleMP and the pool of its pieces
+
+ void drop_master( void );
+
+/*--------------------------------------------------------------------------*/
+ /// gives the master of eDirBundleMP the pieces of intFWCutPolicy eCutRelevant
+ /** The gradient g of the current iterate, whose constant is c, enters the
+  * pool, which is pruned to intFWCutPool pieces; then the master is given g,
+  * the active pieces and the tightest ones [see intFWCutPolicy], fx being the
+  * value of the linking function at the current iterate. */
+
+ void relevant_cuts( OFValue fx , std::vector< double > && g , double c );
+
+/*--------------------------------------------------------------------------*/
  /// evaluate the father Objective at the current point and fill f_grad
  void evaluate_gradient( void );
 
@@ -1012,6 +1064,24 @@ class FrankWolfeSolver : public CDASolver
  ///< strFWMPBCfg, the BlockSolverConfig of the Solver of that master
 
  int f_next_slot = 0;
+
+ int f_cut_policy;     ///< intFWCutPolicy, eCutOldest or eCutRelevant
+ int f_cut_pool;       ///< intFWCutPool, the size of the pool of pieces
+ int f_cut_active;     ///< intFWCutActive, the active pieces kept at least
+
+ /// a piece of the pool of intFWCutPolicy == eCutRelevant
+ struct PoolCut {
+  std::vector< double > g;  ///< the gradient
+  double c;                 ///< the constant, f( x_i ) - < g , x_i >
+  double theta = 0;         ///< the weight in the last master it was in
+  int slot = -1;            ///< the slot in the master, -1 if not there
+  Index n_sel = 0;          ///< how many times the master has been given it
+  Index born = 0;           ///< when it entered the pool
+  };
+
+ std::vector< PoolCut > f_pool;  ///< the pool of eCutRelevant
+ std::vector< bool > f_slot_used;  ///< which slots of the master are taken
+ Index f_cut_count = 0;          ///< the pieces that have entered the pool
  ///< which slot of the bundle the next piece takes when it is full
  int f_max_thread;     ///< intMaxThread
  int f_max_iter;       ///< intMaxIter
@@ -1029,6 +1099,7 @@ class FrankWolfeSolver : public CDASolver
  Index f_n_rejected = 0;   ///< bundle directions refused in the last compute()
  Index f_n_corrected = 0;  ///< refused directions corrected [intFWOnReject]
  Index f_n_lmo = 0;        ///< calls to the LMOs in the last compute()
+ Index f_n_support = 1;    ///< pieces with a positive weight in the master
 
  /// father values of the last step x_{k+1} - x_k, for the cosine of two
  /// consecutive steps in the per-iteration log (intLogVerb 2)

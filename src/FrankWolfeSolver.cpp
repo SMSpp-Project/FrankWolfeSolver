@@ -70,7 +70,8 @@ SMSpp_insert_in_factory_cpp_0( FrankWolfeSolver );
 static const std::vector< std::string > FWSlv_int_pars_str = {
  "intLMOObj" , "intLineSearch" , "intLMOSlvr" , "intAlgorithm" , "intMaxAtoms" ,
  "intCvxComb" , "intHandleMod" , "intFWDirection" , "intFWBundleSize" ,
- "intInitPoint" , "intFWOnReject" , "intFWBestLB"
+ "intInitPoint" , "intFWOnReject" , "intFWBestLB" , "intFWCutPolicy" ,
+ "intFWCutPool" , "intFWCutActive"
  };
 
 /*--------------------------------------------------------------------------*/
@@ -106,6 +107,9 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_accept      = get_dflt_dbl_par( dblFWAccept );
  f_on_reject   = get_dflt_int_par( intFWOnReject );
  f_use_best    = get_dflt_int_par( intFWBestLB );
+ f_cut_policy  = get_dflt_int_par( intFWCutPolicy );
+ f_cut_pool    = get_dflt_int_par( intFWCutPool );
+ f_cut_active  = get_dflt_int_par( intFWCutActive );
  f_best_bound  = 0;
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
@@ -124,12 +128,7 @@ void FrankWolfeSolver::set_default_parameters( void )
 void FrankWolfeSolver::cleanup( void )
 {
  // the master problem of eDirBundleMP goes with the Block it was built for
- if( f_mpb ) {
-  f_mpb->unregister_Solvers();
-  delete f_mpb;
-  f_mpb = nullptr;
-  f_next_slot = 0;
-  }
+ drop_master();
 
  // if the sub-Block objectives were modified, restore the original linear
  // coefficients so that the Block is left pristine
@@ -695,6 +694,19 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
                                   "must be 0 or 1" ) );
    f_use_best = value;
    return;
+  case( intFWCutPolicy ):
+   if( ( value != eCutOldest ) && ( value != eCutRelevant ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWCutPolicy "
+                                  "must be 0 or 1" ) );
+   f_cut_policy = value;
+   return;
+  case( intFWCutPool ):
+   if( value < 0 )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWCutPool "
+                                  "must not be negative" ) );
+   f_cut_pool = value;
+   return;
+  case( intFWCutActive ): f_cut_active = value; return;
   case( intMaxThread ):  f_max_thread = value;  return;
   case( intMaxIter ):    f_max_iter = value;    return;
   case( intLogVerb ):    f_log_verb = value;    return;
@@ -750,6 +762,9 @@ int FrankWolfeSolver::get_dflt_int_par( idx_type par ) const
   case( intInitPoint ):  return( eInitLMO );
   case( intFWOnReject ): return( eRejGradient );
   case( intFWBestLB ):   return( 0 );
+  case( intFWCutPolicy ): return( eCutOldest );
+  case( intFWCutPool ):  return( 0 );
+  case( intFWCutActive ): return( -1 );
   default:               return( CDASolver::get_dflt_int_par( par ) );
   }
  }
@@ -771,6 +786,9 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intInitPoint ):  return( f_init_point );
   case( intFWOnReject ): return( f_on_reject );
   case( intFWBestLB ):   return( f_use_best );
+  case( intFWCutPolicy ): return( f_cut_policy );
+  case( intFWCutPool ):  return( f_cut_pool );
+  case( intFWCutActive ): return( f_cut_active );
   case( intMaxThread ):  return( f_max_thread );
   case( intMaxIter ):    return( f_max_iter );
   case( intLogVerb ):    return( f_log_verb );
@@ -971,6 +989,136 @@ void FrankWolfeSolver::build_master( void )
 
 /*--------------------------------------------------------------------------*/
 
+void FrankWolfeSolver::drop_master( void )
+{
+ /* The pieces of the master are linearizations of the linking function as
+  * it was when they were taken, which a Modification may have changed since:
+  * they go with the compute() they were taken in, as those of eDirBundle and
+  * eDirAggregate do, and the master is built again at the next one. */
+
+ if( f_mpb ) {
+  f_mpb->unregister_Solvers();
+  delete f_mpb;
+  f_mpb = nullptr;
+  }
+ f_next_slot = 0;
+ f_pool.clear();
+ f_slot_used.clear();
+ f_cut_count = 0;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::relevant_cuts( OFValue fx , std::vector< double > && g ,
+                                      double c )
+{
+ const int m = std::max( f_bundle_size , 2 );
+ const Index pool = Index( std::max( f_cut_pool , m ) );
+ const int mact = ( f_cut_active < 0 ) ? ( m - 1 ) / 2
+                                       : std::min( f_cut_active , m - 1 );
+
+ // below this a weight of the master is round-off, not an active piece
+ constexpr double theta_min = 1e-9;
+
+ if( f_slot_used.size() != Index( m ) )
+  f_slot_used.assign( m , false );
+
+ auto drop = [ & ]( PoolCut & pc ) {
+  if( pc.slot >= 0 ) {
+   f_mpb->remove_cut( 0 , pc.slot );
+   f_slot_used[ pc.slot ] = false;
+   pc.slot = -1;
+   }
+  };
+
+ // the current piece enters the pool, and its last place is the current one
+ PoolCut cur;
+ cur.g = std::move( g );
+ cur.c = c;
+ cur.born = f_cut_count++;
+ f_pool.push_back( std::move( cur ) );
+
+ // the pool is pruned: what goes is neither the current piece nor an active
+ // one, and it has been given to the master the fewest times; if all of
+ // them are active, the one with the smallest weight goes
+ while( f_pool.size() > pool ) {
+  const Index last = f_pool.size() - 1;
+  Index out = last;
+  for( Index i = 0 ; i < last ; ++i ) {
+   if( f_pool[ i ].theta > theta_min )
+    continue;
+   if( ( out == last ) || ( f_pool[ i ].n_sel < f_pool[ out ].n_sel ) ||
+       ( ( f_pool[ i ].n_sel == f_pool[ out ].n_sel ) &&
+         ( f_pool[ i ].born < f_pool[ out ].born ) ) )
+    out = i;
+   }
+  if( out == last )
+   for( Index i = 0 ; i < last ; ++i )
+    if( ( out == last ) || ( f_pool[ i ].theta < f_pool[ out ].theta ) )
+     out = i;
+  drop( f_pool[ out ] );
+  f_pool.erase( f_pool.begin() + out );
+  }
+
+ const Index last = f_pool.size() - 1;
+ const Index G = Index( f_xval.size() );
+
+ // the linearization error of each piece at the current iterate
+ std::vector< double > sigma( f_pool.size() , 0 );
+ for( Index i = 0 ; i < last ; ++i ) {
+  double s = double( fx ) - f_pool[ i ].c;
+  for( Index p = 0 ; p < G ; ++p )
+   s -= f_pool[ i ].g[ p ] * f_xval[ p ];
+  sigma[ i ] = s;
+  }
+
+ // the selection: the current piece, the active ones with the largest
+ // weights, then the others with the smallest errors while there is room
+ std::vector< bool > in( f_pool.size() , false );
+ in[ last ] = true;
+ std::vector< Index > ord;
+ for( Index i = 0 ; i < last ; ++i )
+  if( f_pool[ i ].theta > theta_min )
+   ord.push_back( i );
+ std::sort( ord.begin() , ord.end() , [ & ]( Index a , Index b ) {
+  return( f_pool[ a ].theta > f_pool[ b ].theta ); } );
+ int room = m - 1;
+ for( Index k = 0 ; ( k < ord.size() ) && ( int( k ) < mact ) ; ++k ) {
+  in[ ord[ k ] ] = true;
+  --room;
+  }
+ ord.clear();
+ for( Index i = 0 ; i < last ; ++i )
+  if( ! in[ i ] )
+   ord.push_back( i );
+ std::sort( ord.begin() , ord.end() , [ & ]( Index a , Index b ) {
+  return( sigma[ a ] < sigma[ b ] ); } );
+ for( Index k = 0 ; ( k < ord.size() ) && ( room > 0 ) ; ++k , --room )
+  in[ ord[ k ] ] = true;
+
+ // what is not selected leaves the master, then what is selected and not
+ // there enters it, in the slots that have been freed
+ for( Index i = 0 ; i < f_pool.size() ; ++i )
+  if( ! in[ i ] )
+   drop( f_pool[ i ] );
+ for( Index i = 0 ; i < f_pool.size() ; ++i ) {
+  if( ! in[ i ] )
+   continue;
+  ++f_pool[ i ].n_sel;
+  if( f_pool[ i ].slot >= 0 )
+   continue;
+  int slot = 0;
+  while( f_slot_used[ slot ] )
+   ++slot;
+  f_slot_used[ slot ] = true;
+  f_pool[ i ].slot = slot;
+  std::vector< double > gi( f_pool[ i ].g );
+  f_mpb->add_cut( 0 , slot , std::move( gi ) , f_pool[ i ].c );
+  }
+ }
+
+/*--------------------------------------------------------------------------*/
+
 void FrankWolfeSolver::master_direction( OFValue fx )
 {
  if( ! f_mpb )
@@ -992,21 +1140,36 @@ void FrankWolfeSolver::master_direction( OFValue fx )
  for( Index p = 0 ; p < G ; ++p )
   alpha -= g[ p ] * f_xval[ p ];
 
- if( f_mpb->add_cut( 0 , std::move( g ) , alpha ) < 0 ) {
-  // the bundle is full: the oldest piece makes room for the new one
-  f_mpb->remove_cut( 0 , f_next_slot );
-  std::vector< double > gg( f_grad.begin() , f_grad.end() );
-  f_mpb->add_cut( 0 , f_next_slot , std::move( gg ) , alpha );
+ if( f_cut_policy == eCutRelevant )
+  relevant_cuts( fx , std::move( g ) , alpha );
+ else {
+  if( f_mpb->add_cut( 0 , std::move( g ) , alpha ) < 0 ) {
+   // the bundle is full: the oldest piece makes room for the new one
+   f_mpb->remove_cut( 0 , f_next_slot );
+   std::vector< double > gg( f_grad.begin() , f_grad.end() );
+   f_mpb->add_cut( 0 , f_next_slot , std::move( gg ) , alpha );
+   }
+  f_next_slot = ( f_next_slot + 1 ) % std::max( f_bundle_size , 2 );
   }
- f_next_slot = ( f_next_slot + 1 ) % std::max( f_bundle_size , 2 );
 
  f_mpb->set_t( stab_weight() );
 
  if( f_mpb->solve_master() < Solver::kOK ) {
   p_dir = & f_grad;                     // the master says nothing: the
   f_sigma = 0;                          // gradient is always a fallback
+  for( auto & pc : f_pool )
+   pc.theta = 0;
   return;
   }
+
+ // the weights of the pieces, which the next selection starts from, and
+ // how many of them are positive
+ for( auto & pc : f_pool )
+  pc.theta = ( pc.slot >= 0 ) ? f_mpb->get_theta( 0 , pc.slot ) : 0;
+ f_n_support = 0;
+ for( double th : f_mpb->get_thetas( 0 ) )
+  if( th > 1e-9 )
+   ++f_n_support;
 
  const auto z = f_mpb->get_aggregated_subgradient( 0 );
  if( z.size() < G ) {
@@ -1035,6 +1198,7 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
  // the direction is the gradient unless one is built below, and the gradient
  // is a subgradient with no error at all
  f_sigma = 0;
+ f_n_support = 1;
 
  if( f_direction == eDirBundleMP ) {
   master_direction( fx );
@@ -1099,6 +1263,7 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
    for( Index p = 0 ; p < G ; ++p )
     f_bdir[ p ] = f_grad[ p ] + theta * ( f_pgrad[ p ] - f_grad[ p ] );
    p_dir = & f_bdir;
+   f_n_support = ( theta < 1 ) ? 2 : 1;
 
    // the direction is the combination of a linearization with error 0, the
    // gradient here, and one with error alpha, so it is a sigma*-subgradient
@@ -1172,6 +1337,7 @@ void FrankWolfeSolver::aggregate_direction( OFValue fx )
     f_bdir[ p ] = f_grad[ p ] + lambda * ( f_agg[ p ] - f_grad[ p ] );
    p_dir = & f_bdir;
    f_sigma = lambda * sigma;
+   f_n_support = ( lambda < 1 ) ? 2 : 1;
    }
   else
    p_dir = & f_grad;
@@ -1726,6 +1892,7 @@ int FrankWolfeSolver::compute( bool changedvars )
  // are not valid, and they are dropped
  f_pgrad.clear();
  f_agg.clear();
+ drop_master();
 
  int status;
  try {
@@ -2081,7 +2248,8 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
                        : ( master_grad || is_gradient( *p_dir ) ) ? 'G' : 'B';
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
    *f_log << "  FW it " << t << ": value " << f_value << ", gap " << gap
-          << ", dir " << dir_kind << ", LMO " << f_n_lmo << std::endl;
+          << ", dir " << dir_kind << ", LMO " << f_n_lmo
+          << ", pieces " << f_n_support << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
   if( ( gap <= rel_thr ) ||
@@ -2377,7 +2545,7 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
    *f_log << "  FW it " << t << ": value " << f_value << ", gap " << fw_gap
           << ", |A| " << f_aset.size() << ", dir " << dir_kind
-          << ", LMO " << f_n_lmo << std::endl;
+          << ", LMO " << f_n_lmo << ", pieces " << f_n_support << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
 
