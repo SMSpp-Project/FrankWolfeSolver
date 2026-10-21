@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its norm and its cosine with the previous one in the father `Variable`;
   the final summary also says how many calls to the oracle have been made
 
+- the C++20 module `smspp.frankwolfesolver` (`src/FrankWolfeSolver.cppm`),
+  which exports every name that the headers declare at namespace scope and
+  re-exports `smspp`, so that a source file can write `import
+  smspp.frankwolfesolver;` in place of the `#include` of the headers; it is
+  built with the CMake option `SMSpp_BUILD_MODULE`, as the target
+  `SMS++::FrankWolfeSolver_module`
+
 ### Changed
 
 - the values in the log have 12 significant digits, the precision of the
