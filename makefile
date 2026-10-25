@@ -45,6 +45,12 @@ FWSlvH   = $(FWSlvSDR)/include/FrankWolfeSolver.h \
 	$(FWSlvSDR)/include/IntegralityBarrierFunction.h \
 	$(FWSlvSDR)/include/IntegralityBarrierSolver.h
 
+# the C++20 module smspp.frankwolfesolver - - - - - - - - - - - - - - - - - -
+# [see makefile-mod of SMS++]
+
+$(eval $(call SMSppMODrule,FWSlv,$(FWSlvSDR),FrankWolfeSolver,\
+	smspp.frankwolfesolver,$(SMS++MOD)))
+
 # clean - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 clean::
