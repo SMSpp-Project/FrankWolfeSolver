@@ -32,7 +32,6 @@
 module;
 
 #include "FrankWolfeSolver.h"
-#include "IntegralityBarrierFunction.h"
 #include "IntegralityBarrierSolver.h"
 
 /*--------------------------------------------------------------------------*/
