@@ -49,7 +49,7 @@ FWSlvH   = $(FWSlvSDR)/include/FrankWolfeSolver.h \
 # [see makefile-mod of SMS++]
 
 $(eval $(call SMSppMODrule,FWSlv,$(FWSlvSDR),FrankWolfeSolver,\
-	smspp.frankwolfesolver,$(SMS++MOD)))
+	smspp.frankwolfesolver,SMS++))
 
 # clean - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
