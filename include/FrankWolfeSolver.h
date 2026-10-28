@@ -287,7 +287,8 @@ class FrankWolfeSolver : public CDASolver
   eDirGradient = 0 ,  ///< the gradient at the current iterate
   eDirBundle   = 1 ,  ///< the master of two pieces, solved in closed form
   eDirBundleMP = 2 ,  ///< the master of a bundle, a MasterProblemBlock
-  eDirAggregate = 3   ///< the current piece and the aggregate of the older
+  eDirAggregate = 3 , ///< the current piece and the aggregate of the older
+  eDirPrimalDual = 4  ///< the same, the master bounding the gap [see below]
   };
 
  /// what a refused bundle direction is replaced by (value of intFWOnReject)
@@ -481,6 +482,43 @@ class FrankWolfeSolver : public CDASolver
    *   step, after which the aggregate and its error shrink by the same
    *   factor and the master chooses the same direction again, so that
    *   without the test the method may stay at the same iterate for good.
+   *
+   * - eDirPrimalDual: the primal-dual bundle Frank-Wolfe method, whose
+   *   master problem of the same two pieces minimizes a quadratic upper
+   *   bound on the gap the direction gives instead of the stabilized one.
+   *   With a the aggregate, w_a the vertex the oracle has given for it,
+   *   sigma its error at the current iterate x, g the gradient and, for
+   *   the sub-Block j, kappa_j the constant for which
+   *   < a_j , v_j - w_a,j > >= ( kappa_j / 2 ) || v_j - w_a,j ||^2 for
+   *   every v_j of its feasible region, the master is
+   *
+   *     min { ( 1 - mu ) sigma + < a + mu ( g - a ) , x - w_a >
+   *           + sum_j mu^2 || g_j - a_j ||^2 / ( 2 kappa_j ) :
+   *           mu in [ 0 , 1 ] } ,
+   *
+   *   and mu = 0, i.e. the aggregate alone, gives back the bound it gave
+   *   before: the bound f( x ) - U of the iteration never decreases. The
+   *   step towards the vertex is taken if it passes the test of
+   *   dblFWAccept (and decreases the function, whatever that parameter);
+   *   otherwise the iterate stays where it is, nothing is evaluated anew,
+   *   and the direction just refused becomes the aggregate the next
+   *   master starts from, the oracle is not asked again with the gradient
+   *   and intFWOnReject has no effect. The constants are known for a
+   *   sub-Block whose feasible region is a Euclidean ball of radius R_j,
+   *   where kappa_j = || a_j || / R_j, and for a box, a product of
+   *   intervals [ l_i , u_i ] each with its own constant
+   *   kappa_i = 2 | a_i | / ( u_i - l_i ), a being there the vector the
+   *   oracle is given, i.e. the aggregate plus the linear cost of the
+   *   sub-Block when intLMOObj is LMOFull. This direction needs every
+   *   sub-Block to be one of the two, with no nested Block and an oracle
+   *   of a linear function (a sub-Block with a quadratic objective only
+   *   under LMOLinear): a ball is one FRowConstraint on a DQuadFunction
+   *   with all its quadratic coefficients equal and positive and no finite
+   *   bound on the Variable, a box is finite bounds on all the Variable the
+   *   linking function has in the sub-Block and nothing else. It needs
+   *   intAlgorithm AlgVanilla; if a component of a is 0 where g is not, the
+   *   master falls back to the gradient, as in the first iteration, and the
+   *   bound may then go down.
    *
    * The information the second mode uses is the one the method has already
    * paid for: no evaluation is added [see the file documentation for where
@@ -935,6 +973,26 @@ class FrankWolfeSolver : public CDASolver
  void aggregate_direction( OFValue fx );
 
 /*--------------------------------------------------------------------------*/
+ /// the same, the master bounding the gap [see eDirPrimalDual]
+ /** Solves in closed form the master problem of eDirPrimalDual, out of the
+  * gradient at the current iterate, the aggregate, the vertex f_pd_w the
+  * oracle has given for it and the radii f_pd_radius, then replaces the
+  * aggregate with the combination just chosen. */
+
+ void primal_dual_direction( OFValue fx );
+
+/*--------------------------------------------------------------------------*/
+ /// the ball or the box of each sub-Block [see eDirPrimalDual]
+ /** Fills f_pd_radius with the radius of the Euclidean ball a sub-Block is,
+  * f_pd_width with the width of the interval of each Variable of the
+  * linking function in a sub-Block that is a box, and f_pd_cost with the
+  * cost of the sub-Block the oracle adds to it; throws
+  * std::invalid_argument if a sub-Block is neither, or its oracle does not
+  * minimize a linear function. */
+
+ void analyze_sets( void );
+
+/*--------------------------------------------------------------------------*/
  /// replaces a refused direction with one that passes the test, if it can
  /** Under intFWOnReject == eRejCorrect, given the decrease dec the gradient
   * promises towards the vertex of the refused direction and the bound cert
@@ -1137,6 +1195,18 @@ class FrankWolfeSolver : public CDASolver
 
  std::vector< Function::FunctionValue > f_agg;    ///< the aggregate piece
  OFValue f_agg_b = 0;  ///< its constant: the piece is f_agg_b + < f_agg , x >
+
+ std::vector< Function::FunctionValue > f_pd_w;
+ ///< the vertex the oracle has given for f_agg [see eDirPrimalDual]
+
+ std::vector< OFValue > f_pd_radius;
+ ///< the radius of the ball of each sub-Block, 0 for a box [eDirPrimalDual]
+
+ std::vector< OFValue > f_pd_width;
+ ///< u - l for each Variable of the linking function in a box [the same]
+
+ std::vector< OFValue > f_pd_cost;
+ ///< the cost of the sub-Block the oracle adds to each of them [the same]
  std::vector< Function::FunctionValue > f_xval;  ///< father active-var values at x
  std::vector< Function::FunctionValue > f_vval;  ///< father active-var values at v
 

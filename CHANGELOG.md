@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `intFWDirection` `eDirPrimalDual`, the primal-dual bundle Frank-Wolfe
+  method: the master problem of the current gradient and of the aggregate
+  minimizes a quadratic upper bound on the gap the direction gives, built
+  out of the vertex of the aggregate and of how fast its linear function
+  grows away from it on the feasible region of each sub-Block, a Euclidean
+  ball or a box, with a linear cost of its own; a step that does not pass
+  the test of `dblFWAccept` is not taken, nothing is evaluated anew, and the
+  direction refused becomes the aggregate, so that the bound never
+  decreases; only with `AlgVanilla`
+
+- the per-iteration log (`intLogVerb` 2) ends with the lower bound of the
+  iteration and the seconds since the start of `compute()`
+
 - the makefiles build the C++20 module `smspp.frankwolfesolver` when
   `SMSppMOD` is not empty (e.g., `make SMSppMOD=1`), with clang++ 16 or
   later [see `lib/makefile-mod` of SMS++]

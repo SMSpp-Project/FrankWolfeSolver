@@ -20,7 +20,9 @@
  * when the step of the bundle direction has to pass the test of
  * dblFWAccept, with an eta of 0.5 and with one of 0.99, and with the
  * aggregate piece in place of the previous gradient, the correction of a
- * refused direction and the best bound found so far. A last case changes
+ * refused direction and the best bound found so far, and with the
+ * primal-dual master, whose bound has also never to go down and which has
+ * to refuse a sub-Block that is not a box. A last case changes
  * the costs of a sub-Block and solves again, which is what a Solver
  * attached to a Block has to survive.
  *
@@ -380,7 +382,9 @@ bool check_refusals( void )
   // eInitBlock goes with the vanilla algorithm only
   { "intInitPoint eInitBlock with BPCG" , "intInitPoint" , 1 , 0 } ,
   // the sub-Block have one Solver each, at index 0
-  { "intLMOSlvr past the Solver of the sub-Block" , "intLMOSlvr" , 3 , 0 } };
+  { "intLMOSlvr past the Solver of the sub-Block" , "intLMOSlvr" , 3 , 0 } ,
+  // eDirPrimalDual goes with the vanilla algorithm only
+  { "intFWDirection eDirPrimalDual with BPCG" , "intFWDirection" , 4 , 0 } };
 
  for( const auto & r : refusals ) {
   set_par( fw , r.par , r.bad );
@@ -506,7 +510,7 @@ bool check_fixed_step( void )
          "dblFWAccept read back after the refusals" );
  // the integer parameters of the bundle directions refuse what is out
  for( auto [ name , bad ] : std::vector< std::pair< std::string , int > >{
-       { "intFWDirection" , 4 } , { "intFWDirection" , -1 } ,
+       { "intFWDirection" , 5 } , { "intFWDirection" , -1 } ,
        { "intFWOnReject" , 2 } , { "intFWBestLB" , 2 } ,
        { "intFWCutPolicy" , 2 } , { "intFWCutPool" , -1 } } ) {
   threw = false;
@@ -529,6 +533,87 @@ bool check_fixed_step( void )
   delete s;
   }
  delete father;
+ return( ok );
+ }
+
+/*--------------------------------------------------------------------------*/
+/// the bound of eDirPrimalDual never goes down, and a sub-Block that is
+/// neither a ball nor a box is refused
+
+bool check_primal_dual( void )
+{
+ bool ok = true;
+ auto report = [ & ]( bool cond , const std::string & what ) {
+  std::cout << std::left << std::setw( 60 ) << what
+            << ( cond ? "  OK" : "  KO" ) << std::endl;
+  ok &= cond;
+  };
+
+ std::vector< LinearFunction * > costs;
+ auto father = build( costs );
+ auto fw = Solver::new_Solver( "FrankWolfeSolver" );
+ father->register_Solver( fw );
+ set_par( fw , "intLMOObj" , 2 );
+ set_par( fw , "intAlgorithm" , 0 );
+ set_par( fw , "intCvxComb" , 1 );
+ set_par( fw , "intFWDirection" , int( FrankWolfeSolver::eDirPrimalDual ) );
+ set_par( fw , "dblFWAccept" , 0.5 );
+ set_par( fw , "intMaxIter" , 2000 );
+ set_par( fw , "dblRelAcc" , 1e-10 );
+
+ // the bound of each trial, read at the start of the next one: the master
+ // can always keep the aggregate, whose bound is the previous one, and the
+ // bound of a trial is at least the one of its master
+ std::vector< double > lb;
+ set_par( fw , "intEverykIt" , 1 );
+ using TCI = ThinComputeInterface;
+ const auto id = fw->set_event_handler( TCI::eEverykIteration , [ & ]() {
+  lb.push_back( fw->get_lb() );
+  return( TCI::eContinue ); } );
+ fw->compute( false );
+ fw->reset_event_handler( TCI::eEverykIteration , id );
+ set_par( fw , "intEverykIt" , 0 );
+
+ const double scale = std::max( 1.0 , std::abs( optimum() ) );
+ double drop = 0;
+ for( std::size_t k = 2 ; k < lb.size() ; ++k )
+  drop = std::max( drop , lb[ k - 1 ] - lb[ k ] );
+ report( ( lb.size() > 2 ) && ( drop <= 1e-9 * scale ) ,
+	 "eDirPrimalDual: the bound never goes down, in " +
+	 std::to_string( lb.size() ) + " trials" );
+ report( ( ! lb.empty() ) && ( lb.back() <= optimum() + tol * scale ) ,
+	 "eDirPrimalDual: the bound is below the optimum" );
+
+ // a row on two coordinates of the first sub-Block makes it a polytope that
+ // is not a box: compute() refuses it and leaves nothing locked
+ auto sb = static_cast< AbstractBlock * >( father->get_nested_Blocks()[ 0 ] );
+ auto x = sb->get_static_variable_v< ColVariable >( "x" );
+ auto row = new FRowConstraint( nullptr , - Inf< double >() , 100 ,
+				new LinearFunction( { { & ( *x )[ 0 ] , 1 } ,
+						      { & ( *x )[ 1 ] , 1 } } ) );
+ sb->add_static_constraint( *row , "row" );
+ bool threw = false;
+ try { fw->compute( false ); }
+ catch( std::invalid_argument & ) { threw = true; }
+ report( threw , "eDirPrimalDual on a sub-Block that is not a box is "
+	 "refused" );
+ bool solver_free = false;
+ std::thread t( [ & ]() {
+  if( ( solver_free = fw->try_lock() ) )
+   fw->unlock();
+  } );
+ t.join();
+ report( solver_free && father->is_owned_by( nullptr ) ,
+	 "  after it neither the Solver nor the father is locked" );
+
+ father->unregister_Solver( fw );
+ delete fw;
+ for( auto b : father->get_nested_Blocks() ) {
+  auto s = b->get_registered_solvers().front();
+  b->unregister_Solver( s );
+  delete s;
+  }
+ delete father;      // with the row, which it owns as the boxes
  return( ok );
  }
 
@@ -716,6 +801,16 @@ int main( void )
   { "vanilla, aggregate, both" ,        0 , 1 , 3 , 0.99 , 1 , 1 } ,
   { "BPCG, bundle, corrected" ,         2 , 1 , 1 , 0.99 , 1 } ,
   { "Away-step, aggregate, both" ,      1 , 1 , 3 , 0.5 , 1 , 1 } ,
+  // the primal-dual master, which takes no step when the test refuses it:
+  // with an eta of 0.5 and of 0.99, with none (only the steps that do not
+  // decrease the function are refused), with the best bound, and on the
+  // objective at x; the box of one coordinate is a single point, where the
+  // aggregate does not grow, and another has no cost in its sub-Block
+  { "vanilla, primal-dual, eta 0.5" ,   0 , 1 , 4 , 0.5 } ,
+  { "vanilla, primal-dual, eta 0.99" ,  0 , 1 , 4 , 0.99 } ,
+  { "vanilla, primal-dual, no test" ,   0 , 1 , 4 , 0 } ,
+  { "vanilla, primal-dual, best bound" , 0 , 1 , 4 , 0.5 , 0 , 1 } ,
+  { "vanilla, primal-dual, obj at x" ,  0 , 0 , 4 , 0.5 } ,
   { "BPCG, objective at x" ,            2 , 0 , 0 } };
 
  bool all = true;
@@ -769,6 +864,7 @@ int main( void )
  all &= check_other_solver();
  all &= check_refusals();
  all &= check_fixed_step();
+ all &= check_primal_dual();
  all &= check_barrier_function();
 
  std::cout << ( all ? "All tests passed!!" : "Some test FAILED!!" )

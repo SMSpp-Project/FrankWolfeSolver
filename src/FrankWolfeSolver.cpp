@@ -29,6 +29,8 @@
 
 #include "FRowConstraint.h"
 
+#include "OneVarConstraint.h"
+
 #include "LinearFunction.h"
 
 #include "DQuadFunction.h"
@@ -665,9 +667,9 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
   case( intCvxComb ):    f_cvx_comb = value;    return;
   case( intHandleMod ):  f_handle_mod = value;  return;
   case( intFWDirection ):
-   if( ( value < eDirGradient ) || ( value > eDirAggregate ) )
+   if( ( value < eDirGradient ) || ( value > eDirPrimalDual ) )
     throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWDirection "
-                                  "must be between 0 and 3" ) );
+                                  "must be between 0 and 4" ) );
    f_direction = value;
    return;
   case( intFWBundleSize ):
@@ -1213,6 +1215,11 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
   return;
   }
 
+ if( f_direction == eDirPrimalDual ) {
+  primal_dual_direction( fx );
+  return;
+  }
+
  if( f_direction != eDirBundle ) {
   p_dir = & f_grad;
   return;
@@ -1352,6 +1359,196 @@ void FrankWolfeSolver::aggregate_direction( OFValue fx )
   p_dir = & f_grad;
   f_agg.assign( f_grad.begin() , f_grad.end() );
   f_agg_b = bc;
+  }
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::primal_dual_direction( OFValue fx )
+{
+ const Index G = Index( f_grad.size() );
+
+ /* The two pieces are those of aggregate_direction(), the gradient g at the
+  * current iterate x with error 0 and the aggregate a with error sigma, and
+  * mu is the weight of g. With w the vertex the oracle has given for a, the
+  * gap the direction z = a + mu ( g - a ) gives is at most
+  *
+  *   ( 1 - mu ) sigma + < z , x - w > + sum_j || z_j - a_j ||^2 / ( 2 k_j )
+  *
+  * k_j = || a_j || / R_j being how fast < a_j , . > grows away from w_j on
+  * the ball of radius R_j of the sub-Block j (or the same coordinate by
+  * coordinate on a box), and z - a = mu ( g - a ): the minimum over mu in
+  * [ 0 , 1 ] of this convex quadratic is written down at once, and with
+  * mu = 0 the bound is the one a gave. */
+
+ // the constant of the piece of the gradient at x: f( x ) - < g , x >
+ OFValue bc = fx;
+ for( Index p = 0 ; p < G ; ++p )
+  bc -= f_grad[ p ] * f_xval[ p ];
+
+ OFValue mu = 1;
+ if( ( f_agg.size() == G ) && ( f_pd_w.size() == G ) ) {
+  // what is below 0 is numerical noise
+  OFValue sigma = fx - f_agg_b;
+  for( Index p = 0 ; p < G ; ++p )
+   sigma -= f_agg[ p ] * f_xval[ p ];
+  if( sigma < 0 )
+   sigma = 0;
+
+  // the slope at mu = 0 of the linear part, and the curvature
+  OFValue slope = - sigma;
+  for( Index p = 0 ; p < G ; ++p )
+   slope += ( f_grad[ p ] - f_agg[ p ] ) * ( f_xval[ p ] - f_pd_w[ p ] );
+
+  // a ball adds || g_j - a_j ||^2 R_j / || a_j + c_j ||, a box the same for
+  // each coordinate with k_i = 2 | a_i + c_i | / ( u_i - l_i ), c being the
+  // cost of the sub-Block the oracle is given; a component of a + c that is
+  // 0 does not grow anywhere, and there is no bound to keep. On a ball whose
+  // sub-Block has Variable the father does not see, the norm of a + c is
+  // taken on those the father sees, which only makes k_j smaller
+  OFValue curv = 0;
+  bool restart = false;
+  for( Index j = 0 ; j < f_nsb ; ++j ) {
+   const bool ball = ( f_pd_radius[ j ] > 0 );
+   OFValue na = 0 , nd = 0;
+   for( auto p : v_sb[ j ].grad_idx ) {
+    const auto di = f_grad[ p ] - f_agg[ p ];
+    const auto ap = f_agg[ p ] + f_pd_cost[ p ];   // what the oracle sees
+    if( ball ) {
+     na += ap * ap;
+     nd += di * di;
+     }
+    else
+     if( ( di != 0 ) && ( f_pd_width[ p ] > 0 ) ) {
+      if( ap != 0 )
+       curv += di * di * f_pd_width[ p ] / ( 2 * std::abs( ap ) );
+      else
+       restart = true;
+      }
+    }
+   if( nd > 0 ) {
+    if( na > 0 )
+     curv += f_pd_radius[ j ] * nd / std::sqrt( na );
+    else
+     restart = true;
+    }
+   }
+
+  if( ! restart ) {
+   if( curv > 0 )
+    mu = std::min( OFValue( 1 ) , std::max( OFValue( 0 ) , - slope / curv ) );
+   else
+    mu = ( slope < 0 ) ? 1 : 0;
+   }
+
+  if( mu < 1 ) {
+   f_bdir.resize( G );
+   for( Index p = 0 ; p < G ; ++p )
+    f_bdir[ p ] = f_agg[ p ] + mu * ( f_grad[ p ] - f_agg[ p ] );
+   p_dir = & f_bdir;
+   f_sigma = ( 1 - mu ) * sigma;
+   f_n_support = ( mu > 0 ) ? 2 : 1;
+   f_agg = f_bdir;
+   f_agg_b = bc + ( 1 - mu ) * ( f_agg_b - bc );
+   return;
+   }
+  }
+
+ // no aggregate yet, or the master chose the gradient: the aggregate is its
+ // piece
+ p_dir = & f_grad;
+ f_agg.assign( f_grad.begin() , f_grad.end() );
+ f_agg_b = bc;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::analyze_sets( void )
+{
+ f_pd_radius.assign( f_nsb , 0 );
+ f_pd_width.assign( f_fun->get_num_active_var() , 0 );
+ f_pd_cost.assign( f_fun->get_num_active_var() , 0 );
+
+ // the oracle minimizes a linear function, the direction plus the cost of
+ // the sub-Block when intLMOObj puts it in, and that cost moves the vector
+ // whose growth is bounded below by the same amount for all the pieces
+ const bool alpha = ( f_lmo_obj == LMOFull );
+
+ for( Index j = 0 ; j < f_nsb ; ++j ) {
+  const auto & d = v_sb[ j ];
+  bool ok = ( d.lin || ( d.dq && ( f_lmo_obj == LMOLinear ) ) ) &&
+            d.block->get_nested_Blocks().empty();
+  if( ok && alpha )
+   for( Index k = 0 ; k < Index( d.obj_idx.size() ) ; ++k )
+    f_pd_cost[ d.grad_idx[ k ] ] = d.c0[ d.obj_idx[ k ] ];
+
+  // the ball q || x ||^2 + < l , x > + k <= r, whose centre is - l / 2 q and
+  // whose radius is sqrt( ( r - k ) / q + || l ||^2 / 4 q^2 ), or the box
+  // given by the bounds of all the Variable
+  Index nballs = 0;
+  OFValue R2 = 0;
+  std::unordered_map< const Variable * , OFValue > width;
+  const std::function< void( Constraint & ) > visit = [ & ]( Constraint & c ) {
+   if( auto ov = dynamic_cast< OneVarConstraint * >( & c ) ) {
+    const bool lo = ov->get_lhs() > - Inf< RowConstraint::RHSValue >();
+    const bool up = ov->get_rhs() < Inf< RowConstraint::RHSValue >();
+    if( lo && up )
+     width[ ov->get_active_var( 0 ) ] = ov->get_rhs() - ov->get_lhs();
+    else
+     if( lo || up )
+      ok = false;
+    return;
+    }
+   auto fr = dynamic_cast< FRowConstraint * >( & c );
+   auto dq = fr ? dynamic_cast< DQuadFunction * >( fr->get_function() )
+                : nullptr;
+   if( ( ! dq ) || dynamic_cast< QuadFunction * >( dq ) ||
+       ( fr->get_lhs() > - Inf< RowConstraint::RHSValue >() ) ||
+       ( fr->get_rhs() >= Inf< RowConstraint::RHSValue >() ) ||
+       ( ! dq->get_num_active_var() ) ) {
+    ok = false;
+    return;
+    }
+   const OFValue q = dq->get_quadratic_coefficient( 0 );
+   OFValue l2 = 0;
+   for( Index i = 0 ; i < dq->get_num_active_var() ; ++i ) {
+    if( ( ! ( q > 0 ) ) ||
+        ( std::abs( dq->get_quadratic_coefficient( i ) - q ) > 1e-12 * q ) ) {
+     ok = false;
+     return;
+     }
+    l2 += dq->get_linear_coefficient( i ) * dq->get_linear_coefficient( i );
+    }
+   R2 = ( fr->get_rhs() - dq->get_constant_term() ) / q + l2 / ( 4 * q * q );
+   ++nballs;
+   };
+
+  if( ok ) {
+   for( const auto & g : d.block->get_static_constraint_groups() )
+    g->for_each( visit );
+   for( const auto & g : d.block->get_dynamic_constraint_groups() )
+    g->for_each( visit );
+   }
+
+  if( ok && ( nballs == 1 ) && width.empty() && ( R2 > 0 ) ) {
+   f_pd_radius[ j ] = std::sqrt( R2 );
+   continue;
+   }
+
+  if( ok && ( ! nballs ) ) {
+   for( auto p : d.grad_idx ) {
+    auto it = width.find( f_fun->get_active_var( p ) );
+    if( it == width.end() ) { ok = false; break; }
+    f_pd_width[ p ] = it->second;
+    }
+   }
+  else
+   ok = false;
+
+  if( ! ok )
+   throw( std::invalid_argument( "FrankWolfeSolver::analyze_sets: "
+           "intFWDirection eDirPrimalDual needs every sub-Block to be a "
+           "Euclidean ball or a box, with an oracle of a linear function" ) );
   }
  }
 
@@ -1808,6 +2005,9 @@ int FrankWolfeSolver::compute( bool changedvars )
  if( ( f_init_point == eInitBlock ) && ( f_algorithm != AlgVanilla ) )
   throw( std::invalid_argument( "FrankWolfeSolver::compute: intInitPoint "
                                 "eInitBlock needs intAlgorithm AlgVanilla" ) );
+ if( ( f_direction == eDirPrimalDual ) && ( f_algorithm != AlgVanilla ) )
+  throw( std::invalid_argument( "FrankWolfeSolver::compute: intFWDirection "
+                          "eDirPrimalDual needs intAlgorithm AlgVanilla" ) );
 
  // lock the Solver against concurrent compute() from other threads: every
  // Solver has an internal recursive mutex (see Solver::lock()). It is released
@@ -1839,6 +2039,10 @@ int FrankWolfeSolver::compute( bool changedvars )
     if( d.dq )
      throw( std::logic_error( "FrankWolfeSolver: LMOLinear requires "
       "LinearFunction sub-Block objectives; use LMOQuad/LMOFull otherwise" ) );
+
+  // the balls and the boxes of eDirPrimalDual, read before anything changes
+  if( f_direction == eDirPrimalDual )
+   analyze_sets();
   }
  catch( ... ) {
   if( ! owned )
@@ -1892,6 +2096,7 @@ int FrankWolfeSolver::compute( bool changedvars )
  // are not valid, and they are dropped
  f_pgrad.clear();
  f_agg.clear();
+ f_pd_w.clear();
  drop_master();
 
  int status;
@@ -2119,6 +2324,13 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   f_has_sol = true;
   }
 
+ const bool primal_dual = ( f_direction == eDirPrimalDual );
+
+ // under eDirPrimalDual, whether the step of the previous iteration has been
+ // refused, leaving the iterate, the value and the gradient as they were
+ bool stay = false;
+ OFValue father_val = 0;
+
  int status = kStopIter;
  double lastETT = 0;            // last time the eEveryTTime events were fired
 
@@ -2140,9 +2352,12 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    }
 
   f_x->write( f_Block );
-  evaluate_gradient();
-  OFValue father_val = f_fun->get_value();
-  capture_father_values( f_xval );
+  if( ! stay ) {
+   evaluate_gradient();
+   father_val = f_fun->get_value();
+   capture_father_values( f_xval );
+   }
+  stay = false;
   bundle_direction( father_val );
 
   /* The oracle is asked with the direction, and asked again with the
@@ -2153,7 +2368,8 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   OFValue mx_sum , mv_sum , cv , gx , cost_x , gap;
   // what the step is taken along, for the per-iteration log: 'G' the
   // gradient, 'B' the direction of the master, 'C' the same corrected, 'F'
-  // the gradient the oracle has been asked again with after a refusal
+  // the gradient the oracle has been asked again with after a refusal, 'R'
+  // a step of eDirPrimalDual refused and not taken
   const bool master_grad = ( p_dir == & f_grad );
   bool corrected = false;
   bool fell_back = false;
@@ -2168,6 +2384,8 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    for( auto & d : v_sb )
     mv_sum += d.value;                            // sum_j M_j(v_j)
    capture_father_values( f_vval );
+   if( primal_dual )
+    f_pd_w = f_vval;                       // the vertex of the new aggregate
 
    gx = grad_dot( f_xval );               // <grad f_father(x), x>
    cv = mv_sum - dir_dot( f_vval );       // sum_j h_j(v_j)
@@ -2218,11 +2436,26 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
     gap = f_max ? ( f_best_bound - f_value ) : ( f_value - f_best_bound );
     }
 
+   // the decrease the gradient promises along the step towards the vertex
+   const OFValue dec = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+
+   // eDirPrimalDual asks the oracle once: a step that does not pass the test
+   // is not taken, and what the trial has given is its new bound
+   if( primal_dual ) {
+    if( small_gap( gap ) || ( ( dec > 0 ) && ( dec >= f_accept * gap ) ) ) {
+     if( p_dir != & f_grad )
+      ++f_n_accepted;
+     }
+    else {
+     ++f_n_rejected;
+     stay = true;
+     }
+    break;
+    }
+
    if( ( f_accept <= 0 ) || ( p_dir == & f_grad ) || small_gap( gap ) )
     break;
 
-   // the decrease the gradient promises along the step towards the vertex
-   const OFValue dec = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
    if( dec >= f_accept * gap ) {
     ++f_n_accepted;
     break;
@@ -2244,12 +2477,13 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
 
   f_niter = t; f_last_gap = gap;             // for the final-summary log
 
-  const char dir_kind = fell_back ? 'F' : corrected ? 'C'
+  const char dir_kind = stay ? 'R' : fell_back ? 'F' : corrected ? 'C'
                        : ( master_grad || is_gradient( *p_dir ) ) ? 'G' : 'B';
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
    *f_log << "  FW it " << t << ": value " << f_value << ", gap " << gap
           << ", dir " << dir_kind << ", LMO " << f_n_lmo
-          << ", pieces " << f_n_support << std::endl;
+          << ", pieces " << f_n_support << ", bound " << f_bound
+          << ", time " << elapsed() << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
   if( ( gap <= rel_thr ) ||
@@ -2266,6 +2500,10 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
      }
     }
    }
+
+  // a refused step of eDirPrimalDual is not taken
+  if( stay )
+   continue;
 
   OFValue gamma;
   if( exact ) {
@@ -2545,7 +2783,8 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
    *f_log << "  FW it " << t << ": value " << f_value << ", gap " << fw_gap
           << ", |A| " << f_aset.size() << ", dir " << dir_kind
-          << ", LMO " << f_n_lmo << ", pieces " << f_n_support << std::endl;
+          << ", LMO " << f_n_lmo << ", pieces " << f_n_support
+          << ", bound " << f_bound << ", time " << elapsed() << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
 
