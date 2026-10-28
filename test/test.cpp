@@ -554,10 +554,11 @@ bool check_primal_dual( void )
  // a father with the given parameters, its bound at the start of each
  // trial, i.e. the one of the previous trial, read by an event
  using TCI = ThinComputeInterface;
- // the value is held to the optimum only if converge is true
+ // the value is held to the optimum only if converge is true, and with
+ // centre true the iterates start from the centre of the boxes
  auto run = [ & ]( const Case & c , std::vector< double > & lb ,
 		   int maxiter , double & value , double & bound ,
-		   bool converge ) {
+		   bool converge , bool centre ) {
   std::vector< LinearFunction * > costs;
   auto father = build( costs );
   auto fw = Solver::new_Solver( "FrankWolfeSolver" );
@@ -571,6 +572,17 @@ bool check_primal_dual( void )
   set_par( fw , "intMaxIter" , maxiter );
   set_par( fw , "dblRelAcc" , 1e-10 );
   set_par( fw , "intEverykIt" , 1 );
+  if( centre ) {
+   set_par( fw , "intInitPoint" , int( FrankWolfeSolver::eInitBlock ) );
+   for( int j = 0 ; j < K ; ++j ) {
+    auto x = father->get_nested_Blocks()[ j ]->get_static_variable_v<
+					       ColVariable >( "x" );
+    for( int i = 0 ; i < N ; ++i ) {
+     const auto & d = data[ j * N + i ];
+     ( *x )[ i ].set_value( ( d.l + d.u ) / 2 );
+     }
+    }
+   }
   lb.clear();
   const auto id = fw->set_event_handler( TCI::eEverykIteration , [ & ]() {
    lb.push_back( fw->get_lb() );
@@ -616,7 +628,7 @@ bool check_primal_dual( void )
  const double opt = optimum();
  const double scale = std::max( 1.0 , std::abs( opt ) );
  run( { "primal-dual, eta 0.5, inner optimum" , 0 , 1 , 4 , 0.5 } , lb ,
-      2000 , value , bound , false );
+      2000 , value , bound , false , false );
  report( ( bound <= opt + tol * scale ) && ( value >= opt - tol * scale ) ,
 	 "primal-dual, eta 0.5, inner optimum: the value and the bound "
 	 "hold" );
@@ -625,7 +637,10 @@ bool check_primal_dual( void )
   * from the unconstrained minimum, the gradient at the optimum is far from
   * 0 on all of them, and the growth constants have a positive minimum: the
   * method has to converge and its bound has never to go down, whatever the
-  * test, with the best bound and on the objective at x. */
+  * test, with the best bound and on the objective at x. The father being
+  * separable, the oracle gives the optimal vertex at once, and the line
+  * search stops short of it only from a point inside: the iterates start
+  * from the centre of the boxes. */
 
  const auto saved = data;
  for( std::size_t i = 0 ; i < data.size() ; ++i ) {
@@ -643,7 +658,7 @@ bool check_primal_dual( void )
 			       0.5 , 0 , 1 } ,
 			 Case{ "primal-dual, objective at x, vertex" , 0 , 0 ,
 			       4 , 0.5 } } ) {
-  ok &= run( c , lb , 200000 , value , bound , true );
+  ok &= run( c , lb , 200000 , value , bound , true , true );
   report( ( lb.size() > 2 ) && ( drop( lb ) <= 1e-9 * vscale ) ,
 	  "  the bound never goes down, in " + std::to_string( lb.size() ) +
 	  " trials" );
