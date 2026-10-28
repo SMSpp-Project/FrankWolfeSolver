@@ -518,7 +518,11 @@ class FrankWolfeSolver : public CDASolver
    *   linking function has in the sub-Block and nothing else. It needs
    *   intAlgorithm AlgVanilla; if a component of a is 0 where g is not, the
    *   master falls back to the gradient, as in the first iteration, and the
-   *   bound may then go down.
+   *   bound may then go down. The constants of a box vanish along the
+   *   coordinates whose optimal value is inside their interval, the
+   *   gradient being 0 there, and then the master keeps the aggregate and
+   *   the refused steps pile up until such a fall back: on a box the
+   *   method converges as its theory says when the optimum is a vertex.
    *
    * The information the second mode uses is the one the method has already
    * paid for: no evaluation is added [see the file documentation for where

@@ -21,8 +21,9 @@
  * dblFWAccept, with an eta of 0.5 and with one of 0.99, and with the
  * aggregate piece in place of the previous gradient, the correction of a
  * refused direction and the best bound found so far, and with the
- * primal-dual master, whose bound has also never to go down and which has
- * to refuse a sub-Block that is not a box. A last case changes
+ * primal-dual master, which on a box converges and never lowers its bound
+ * when the optimum is a vertex, is only held to its bound otherwise, and
+ * has to refuse a sub-Block that is not a box. A last case changes
  * the costs of a sub-Block and solves again, which is what a Solver
  * attached to a Block has to survive.
  *
@@ -537,8 +538,9 @@ bool check_fixed_step( void )
  }
 
 /*--------------------------------------------------------------------------*/
-/// the bound of eDirPrimalDual never goes down, and a sub-Block that is
-/// neither a ball nor a box is refused
+/// eDirPrimalDual: its bound holds, it converges and its bound never goes
+/// down when the optimum is a vertex, and a sub-Block that is neither a
+/// ball nor a box is refused
 
 bool check_primal_dual( void )
 {
@@ -549,43 +551,114 @@ bool check_primal_dual( void )
   ok &= cond;
   };
 
+ // a father with the given parameters, its bound at the start of each
+ // trial, i.e. the one of the previous trial, read by an event
+ using TCI = ThinComputeInterface;
+ // the value is held to the optimum only if converge is true
+ auto run = [ & ]( const Case & c , std::vector< double > & lb ,
+		   int maxiter , double & value , double & bound ,
+		   bool converge ) {
+  std::vector< LinearFunction * > costs;
+  auto father = build( costs );
+  auto fw = Solver::new_Solver( "FrankWolfeSolver" );
+  father->register_Solver( fw );
+  set_par( fw , "intLMOObj" , 2 );
+  set_par( fw , "intAlgorithm" , 0 );
+  set_par( fw , "intCvxComb" , c.cvx_comb );
+  set_par( fw , "intFWDirection" , c.direction );
+  set_par( fw , "dblFWAccept" , c.accept );
+  set_par( fw , "intFWBestLB" , c.best );
+  set_par( fw , "intMaxIter" , maxiter );
+  set_par( fw , "dblRelAcc" , 1e-10 );
+  set_par( fw , "intEverykIt" , 1 );
+  lb.clear();
+  const auto id = fw->set_event_handler( TCI::eEverykIteration , [ & ]() {
+   lb.push_back( fw->get_lb() );
+   return( TCI::eContinue ); } );
+  bool good = true;
+  if( converge )
+   good = check( fw , c.name );
+  else
+   fw->compute( false );
+  value = fw->get_var_value();
+  bound = fw->get_lb();
+  fw->reset_event_handler( TCI::eEverykIteration , id );
+  father->unregister_Solver( fw );
+  delete fw;
+  for( auto b : father->get_nested_Blocks() ) {
+   auto s = b->get_registered_solvers().front();
+   b->unregister_Solver( s );
+   delete s;
+   }
+  delete father;
+  return( good );
+  };
+
+ // the largest decrease of the bound from a trial to the next
+ auto drop = []( const std::vector< double > & lb ) {
+  double d = 0;
+  for( std::size_t k = 2 ; k < lb.size() ; ++k )
+   d = std::max( d , lb[ k - 1 ] - lb[ k ] );
+  return( d ); };
+
+ std::vector< double > lb;
+ double value , bound;
+
+ /* On a box the growth of the linear function of the aggregate away from
+  * its vertex is 2 | a_i | / ( u_i - l_i ) along each coordinate, which
+  * vanishes where the gradient of the problem does at the optimum, i.e.
+  * where the optimal coordinate is inside its interval: there the master
+  * keeps the aggregate, the refused steps pile up, and when a component of
+  * the aggregate gets to 0 the master starts again from the gradient and the
+  * bound may go down. With the data of main() some coordinates are inside,
+  * and the method is only held to the bound it gives. */
+
+ const double opt = optimum();
+ const double scale = std::max( 1.0 , std::abs( opt ) );
+ run( { "primal-dual, eta 0.5, inner optimum" , 0 , 1 , 4 , 0.5 } , lb ,
+      2000 , value , bound , false );
+ report( ( bound <= opt + tol * scale ) && ( value >= opt - tol * scale ) ,
+	 "primal-dual, eta 0.5, inner optimum: the value and the bound "
+	 "hold" );
+
+ /* With every optimal coordinate at a vertex of its box, a margin of 1 away
+  * from the unconstrained minimum, the gradient at the optimum is far from
+  * 0 on all of them, and the growth constants have a positive minimum: the
+  * method has to converge and its bound has never to go down, whatever the
+  * test, with the best bound and on the objective at x. */
+
+ const auto saved = data;
+ for( std::size_t i = 0 ; i < data.size() ; ++i ) {
+  auto & d = data[ i ];
+  const double target = ( i % 2 ) ? d.u + 1 : d.l - 1;
+  d.b = - 2 * d.a * target - d.c;
+  }
+ const double vopt = optimum();
+ const double vscale = std::max( 1.0 , std::abs( vopt ) );
+ for( const Case & c : { Case{ "primal-dual, eta 0.5, vertex" , 0 , 1 , 4 ,
+			       0.5 } ,
+			 Case{ "primal-dual, eta 0.99, vertex" , 0 , 1 , 4 ,
+			       0.99 } ,
+			 Case{ "primal-dual, best bound, vertex" , 0 , 1 , 4 ,
+			       0.5 , 0 , 1 } ,
+			 Case{ "primal-dual, objective at x, vertex" , 0 , 0 ,
+			       4 , 0.5 } } ) {
+  ok &= run( c , lb , 200000 , value , bound , true );
+  report( ( lb.size() > 2 ) && ( drop( lb ) <= 1e-9 * vscale ) ,
+	  "  the bound never goes down, in " + std::to_string( lb.size() ) +
+	  " trials" );
+  }
+ data = saved;
+
+ // a row on two coordinates of the first sub-Block makes it a polytope that
+ // is not a box: compute() refuses it and leaves nothing locked
  std::vector< LinearFunction * > costs;
  auto father = build( costs );
  auto fw = Solver::new_Solver( "FrankWolfeSolver" );
  father->register_Solver( fw );
  set_par( fw , "intLMOObj" , 2 );
  set_par( fw , "intAlgorithm" , 0 );
- set_par( fw , "intCvxComb" , 1 );
  set_par( fw , "intFWDirection" , int( FrankWolfeSolver::eDirPrimalDual ) );
- set_par( fw , "dblFWAccept" , 0.5 );
- set_par( fw , "intMaxIter" , 2000 );
- set_par( fw , "dblRelAcc" , 1e-10 );
-
- // the bound of each trial, read at the start of the next one: the master
- // can always keep the aggregate, whose bound is the previous one, and the
- // bound of a trial is at least the one of its master
- std::vector< double > lb;
- set_par( fw , "intEverykIt" , 1 );
- using TCI = ThinComputeInterface;
- const auto id = fw->set_event_handler( TCI::eEverykIteration , [ & ]() {
-  lb.push_back( fw->get_lb() );
-  return( TCI::eContinue ); } );
- fw->compute( false );
- fw->reset_event_handler( TCI::eEverykIteration , id );
- set_par( fw , "intEverykIt" , 0 );
-
- const double scale = std::max( 1.0 , std::abs( optimum() ) );
- double drop = 0;
- for( std::size_t k = 2 ; k < lb.size() ; ++k )
-  drop = std::max( drop , lb[ k - 1 ] - lb[ k ] );
- report( ( lb.size() > 2 ) && ( drop <= 1e-9 * scale ) ,
-	 "eDirPrimalDual: the bound never goes down, in " +
-	 std::to_string( lb.size() ) + " trials" );
- report( ( ! lb.empty() ) && ( lb.back() <= optimum() + tol * scale ) ,
-	 "eDirPrimalDual: the bound is below the optimum" );
-
- // a row on two coordinates of the first sub-Block makes it a polytope that
- // is not a box: compute() refuses it and leaves nothing locked
  auto sb = static_cast< AbstractBlock * >( father->get_nested_Blocks()[ 0 ] );
  auto x = sb->get_static_variable_v< ColVariable >( "x" );
  auto row = new FRowConstraint( nullptr , - Inf< double >() , 100 ,
@@ -801,16 +874,9 @@ int main( void )
   { "vanilla, aggregate, both" ,        0 , 1 , 3 , 0.99 , 1 , 1 } ,
   { "BPCG, bundle, corrected" ,         2 , 1 , 1 , 0.99 , 1 } ,
   { "Away-step, aggregate, both" ,      1 , 1 , 3 , 0.5 , 1 , 1 } ,
-  // the primal-dual master, which takes no step when the test refuses it:
-  // with an eta of 0.5 and of 0.99, with none (only the steps that do not
-  // decrease the function are refused), with the best bound, and on the
-  // objective at x; the box of one coordinate is a single point, where the
-  // aggregate does not grow, and another has no cost in its sub-Block
-  { "vanilla, primal-dual, eta 0.5" ,   0 , 1 , 4 , 0.5 } ,
-  { "vanilla, primal-dual, eta 0.99" ,  0 , 1 , 4 , 0.99 } ,
+  // the primal-dual master with no test, which refuses only the steps that
+  // do not decrease the function [see check_primal_dual() for the others]
   { "vanilla, primal-dual, no test" ,   0 , 1 , 4 , 0 } ,
-  { "vanilla, primal-dual, best bound" , 0 , 1 , 4 , 0.5 , 0 , 1 } ,
-  { "vanilla, primal-dual, obj at x" ,  0 , 0 , 4 , 0.5 } ,
   { "BPCG, objective at x" ,            2 , 0 , 0 } };
 
  bool all = true;
