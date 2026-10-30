@@ -544,6 +544,7 @@ void FrankWolfeSolver::analyze_subBlocks( void )
    d.added = std::move( it->second );
 
   d.obj = dynamic_cast< FRealObjective * >( d.block->get_objective() );
+  d.w = d.block->get_objective_weight();
   if( ! d.obj )
    throw( std::invalid_argument(
     "FrankWolfeSolver: a sub-Block has no FRealObjective" ) );
@@ -1626,7 +1627,7 @@ void FrankWolfeSolver::scatter( void )
    std::vector< std::pair< Index , FunctionValue > > upd( d.obj_idx.size() );
    for( Index k = 0 ; k < d.obj_idx.size() ; ++k )
     upd[ k ] = { d.obj_idx[ k ] ,
-                 d.c0[ d.obj_idx[ k ] ] + dir[ d.grad_idx[ k ] ] };
+                 d.c0[ d.obj_idx[ k ] ] + dir[ d.grad_idx[ k ] ] / d.w };
    std::sort( upd.begin() , upd.end() );
    Function::Subset nms( upd.size() );
    Function::Vec_FunctionValue nc( upd.size() );
@@ -1647,7 +1648,7 @@ void FrankWolfeSolver::scatter( void )
    for( Index i = 0 ; i < n ; ++i )
     nc[ i ] = d.c0[ i ];
   for( Index k = 0 ; k < d.obj_idx.size() ; ++k )
-   nc[ d.obj_idx[ k ] ] += dir[ d.grad_idx[ k ] ];
+   nc[ d.obj_idx[ k ] ] += dir[ d.grad_idx[ k ] ] / d.w;
 
   if( d.dq )
    d.dq->modify_linear_coefficients( std::move( nc ) ,
@@ -1667,7 +1668,7 @@ void FrankWolfeSolver::run_LMOs( bool changedvars )
  auto run_one = [ changedvars ]( SubBlockData & d ) {
   try {
    d.status = d.lmo->compute( changedvars );
-   d.value  = d.lmo->get_var_value();   // M_j(v_j)
+   d.value  = d.w * d.lmo->get_var_value();   // M_j(v_j), weighted
    d.lmo->get_var_solution();           // materialize v_j into the variables
    }
   catch( ... ) { d.excp = std::current_exception(); }
@@ -1984,7 +1985,7 @@ void FrankWolfeSolver::recompute_atom_costs( void )
   OFValue ci = 0;
   for( auto & d : v_sb ) {
    d.fun->compute( true );
-   ci += d.fun->get_value();
+   ci += d.w * d.fun->get_value();
    }
   a.f_ci = ci;
   }
@@ -2187,7 +2188,7 @@ Solver::OFValue FrankWolfeSolver::eval_modified_objective( void )
  OFValue s = 0;
  for( auto & d : v_sb ) {
   d.fun->compute( true );
-  s += d.fun->get_value();
+  s += d.w * d.fun->get_value();
   }
  return( s );
  }

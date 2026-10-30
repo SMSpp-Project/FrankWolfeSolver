@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- the weight of the Objective of a `Block` [see
+  `Block::set_objective_weight()`]: `FrankWolfeSolver` writes into the
+  Objective of each sub-Block the direction divided by its weight, which the
+  LMO does not see, and multiplies by it the values of the sub-Block;
+  `IntegralityBarrierSolver` moves the terms of each nested Objective into the
+  root with their weight
+
 - `intFWDirection` `eDirPrimalDual`, the primal-dual bundle Frank-Wolfe
   method: the master problem of the current gradient and of the aggregate
   minimizes a quadratic upper bound on the gap the direction gives, built

@@ -826,6 +826,10 @@ class FrankWolfeSolver : public CDASolver
  struct SubBlockData {
   Block * block = nullptr;          ///< the sub-Block
   FRealObjective * obj = nullptr;   ///< its FRealObjective
+  /// the weight of its Objective [see Block::set_objective_weight()]: the
+  /// direction written into it is divided by it, since the LMO does not see
+  /// it, and its values are multiplied by it
+  Function::FunctionValue w = 1;
   Function * fun = nullptr;         ///< its objective Function (Lin/DQuad/Quad)
   LinearFunction * lin = nullptr;   ///< == fun if a LinearFunction, else nullptr
   DQuadFunction * dq = nullptr;     ///< == fun if a [D]QuadFunction, else nullptr
