@@ -97,22 +97,11 @@ iterate, or the vertex the oracle gives, is feasible.
 These instructions will let you build `FrankWolfeSolver`.
 
 
-The module also comes ready-made, in any of
-
-```sh
-sudo add-apt-repository ppa:smspp-project/smspp   # Ubuntu
-sudo apt install libsmspp-frankwolfe-dev
-
-conda install -c conda-forge smspp-project        # Linux, macOS, Windows
-
-brew tap SMSpp-Project/smspp                      # macOS, Linux
-brew install smspp
-
-vcpkg install "smspp[core,frankwolfe]"            # from the sources
-```
-
-where apt and the port give the module alone, while conda and the tap carry
-the whole framework. What follows is about building it yourself.
+The module also comes ready-made: on Ubuntu as `libsmspp-frankwolfe-dev`, in
+vcpkg as `smspp[core,frankwolfe]`, and in the other channels that the
+[installation
+guide](https://gitlab.com/smspp/smspp-project/-/wikis/Installing-SMS++) of
+SMS++ lists. What follows is about building it yourself.
 
 ### Requirements
 
