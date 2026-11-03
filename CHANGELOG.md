@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-03
+
 ### Added
 
 - the weight of the Objective of a `Block` [see
@@ -249,6 +251,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RPATH relative to itself, so that an installed tree keeps working wherever
   it is moved
 
-[Unreleased]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.3.0...develop
+[Unreleased]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.4.0...develop
+[0.4.0]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.3.0...0.4.0
 [0.3.0]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.2.0...0.3.0
 [0.2.0]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.1.0...0.2.0
