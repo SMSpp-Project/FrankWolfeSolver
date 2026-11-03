@@ -29,6 +29,8 @@
 
 #include "FRowConstraint.h"
 
+#include "OneVarConstraint.h"
+
 #include "LinearFunction.h"
 
 #include "DQuadFunction.h"
@@ -70,7 +72,8 @@ SMSpp_insert_in_factory_cpp_0( FrankWolfeSolver );
 static const std::vector< std::string > FWSlv_int_pars_str = {
  "intLMOObj" , "intLineSearch" , "intLMOSlvr" , "intAlgorithm" , "intMaxAtoms" ,
  "intCvxComb" , "intHandleMod" , "intFWDirection" , "intFWBundleSize" ,
- "intInitPoint" , "intFWOnReject" , "intFWBestLB"
+ "intInitPoint" , "intFWOnReject" , "intFWBestLB" , "intFWCutPolicy" ,
+ "intFWCutPool" , "intFWCutActive"
  };
 
 /*--------------------------------------------------------------------------*/
@@ -106,6 +109,9 @@ void FrankWolfeSolver::set_default_parameters( void )
  f_accept      = get_dflt_dbl_par( dblFWAccept );
  f_on_reject   = get_dflt_int_par( intFWOnReject );
  f_use_best    = get_dflt_int_par( intFWBestLB );
+ f_cut_policy  = get_dflt_int_par( intFWCutPolicy );
+ f_cut_pool    = get_dflt_int_par( intFWCutPool );
+ f_cut_active  = get_dflt_int_par( intFWCutActive );
  f_best_bound  = 0;
  f_max_thread  = get_dflt_int_par( intMaxThread );
  f_max_iter    = get_dflt_int_par( intMaxIter );
@@ -124,12 +130,7 @@ void FrankWolfeSolver::set_default_parameters( void )
 void FrankWolfeSolver::cleanup( void )
 {
  // the master problem of eDirBundleMP goes with the Block it was built for
- if( f_mpb ) {
-  f_mpb->unregister_Solvers();
-  delete f_mpb;
-  f_mpb = nullptr;
-  f_next_slot = 0;
-  }
+ drop_master();
 
  // if the sub-Block objectives were modified, restore the original linear
  // coefficients so that the Block is left pristine
@@ -543,6 +544,7 @@ void FrankWolfeSolver::analyze_subBlocks( void )
    d.added = std::move( it->second );
 
   d.obj = dynamic_cast< FRealObjective * >( d.block->get_objective() );
+  d.w = d.block->get_objective_weight();
   if( ! d.obj )
    throw( std::invalid_argument(
     "FrankWolfeSolver: a sub-Block has no FRealObjective" ) );
@@ -666,9 +668,9 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
   case( intCvxComb ):    f_cvx_comb = value;    return;
   case( intHandleMod ):  f_handle_mod = value;  return;
   case( intFWDirection ):
-   if( ( value < eDirGradient ) || ( value > eDirAggregate ) )
+   if( ( value < eDirGradient ) || ( value > eDirPrimalDual ) )
     throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWDirection "
-                                  "must be between 0 and 3" ) );
+                                  "must be between 0 and 4" ) );
    f_direction = value;
    return;
   case( intFWBundleSize ):
@@ -684,9 +686,9 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
    f_init_point = value;
    return;
   case( intFWOnReject ):
-   if( ( value != eRejGradient ) && ( value != eRejCorrect ) )
+   if( ( value < eRejGradient ) || ( value > eRejStay ) )
     throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWOnReject "
-                                  "must be 0 or 1" ) );
+                                  "must be 0, 1 or 2" ) );
    f_on_reject = value;
    return;
   case( intFWBestLB ):
@@ -695,6 +697,19 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
                                   "must be 0 or 1" ) );
    f_use_best = value;
    return;
+  case( intFWCutPolicy ):
+   if( ( value != eCutOldest ) && ( value != eCutRelevant ) )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWCutPolicy "
+                                  "must be 0 or 1" ) );
+   f_cut_policy = value;
+   return;
+  case( intFWCutPool ):
+   if( value < 0 )
+    throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWCutPool "
+                                  "must not be negative" ) );
+   f_cut_pool = value;
+   return;
+  case( intFWCutActive ): f_cut_active = value; return;
   case( intMaxThread ):  f_max_thread = value;  return;
   case( intMaxIter ):    f_max_iter = value;    return;
   case( intLogVerb ):    f_log_verb = value;    return;
@@ -750,6 +765,9 @@ int FrankWolfeSolver::get_dflt_int_par( idx_type par ) const
   case( intInitPoint ):  return( eInitLMO );
   case( intFWOnReject ): return( eRejGradient );
   case( intFWBestLB ):   return( 0 );
+  case( intFWCutPolicy ): return( eCutOldest );
+  case( intFWCutPool ):  return( 0 );
+  case( intFWCutActive ): return( -1 );
   default:               return( CDASolver::get_dflt_int_par( par ) );
   }
  }
@@ -771,6 +789,9 @@ int FrankWolfeSolver::get_int_par( idx_type par ) const
   case( intInitPoint ):  return( f_init_point );
   case( intFWOnReject ): return( f_on_reject );
   case( intFWBestLB ):   return( f_use_best );
+  case( intFWCutPolicy ): return( f_cut_policy );
+  case( intFWCutPool ):  return( f_cut_pool );
+  case( intFWCutActive ): return( f_cut_active );
   case( intMaxThread ):  return( f_max_thread );
   case( intMaxIter ):    return( f_max_iter );
   case( intLogVerb ):    return( f_log_verb );
@@ -971,6 +992,136 @@ void FrankWolfeSolver::build_master( void )
 
 /*--------------------------------------------------------------------------*/
 
+void FrankWolfeSolver::drop_master( void )
+{
+ /* The pieces of the master are linearizations of the linking function as
+  * it was when they were taken, which a Modification may have changed since:
+  * they go with the compute() they were taken in, as those of eDirBundle and
+  * eDirAggregate do, and the master is built again at the next one. */
+
+ if( f_mpb ) {
+  f_mpb->unregister_Solvers();
+  delete f_mpb;
+  f_mpb = nullptr;
+  }
+ f_next_slot = 0;
+ f_pool.clear();
+ f_slot_used.clear();
+ f_cut_count = 0;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::relevant_cuts( OFValue fx , std::vector< double > && g ,
+                                      double c )
+{
+ const int m = std::max( f_bundle_size , 2 );
+ const Index pool = Index( std::max( f_cut_pool , m ) );
+ const int mact = ( f_cut_active < 0 ) ? ( m - 1 ) / 2
+                                       : std::min( f_cut_active , m - 1 );
+
+ // below this a weight of the master is round-off, not an active piece
+ constexpr double theta_min = 1e-9;
+
+ if( f_slot_used.size() != Index( m ) )
+  f_slot_used.assign( m , false );
+
+ auto drop = [ & ]( PoolCut & pc ) {
+  if( pc.slot >= 0 ) {
+   f_mpb->remove_cut( 0 , pc.slot );
+   f_slot_used[ pc.slot ] = false;
+   pc.slot = -1;
+   }
+  };
+
+ // the current piece enters the pool, and its last place is the current one
+ PoolCut cur;
+ cur.g = std::move( g );
+ cur.c = c;
+ cur.born = f_cut_count++;
+ f_pool.push_back( std::move( cur ) );
+
+ // the pool is pruned: what goes is neither the current piece nor an active
+ // one, and it has been given to the master the fewest times; if all of
+ // them are active, the one with the smallest weight goes
+ while( f_pool.size() > pool ) {
+  const Index last = f_pool.size() - 1;
+  Index out = last;
+  for( Index i = 0 ; i < last ; ++i ) {
+   if( f_pool[ i ].theta > theta_min )
+    continue;
+   if( ( out == last ) || ( f_pool[ i ].n_sel < f_pool[ out ].n_sel ) ||
+       ( ( f_pool[ i ].n_sel == f_pool[ out ].n_sel ) &&
+         ( f_pool[ i ].born < f_pool[ out ].born ) ) )
+    out = i;
+   }
+  if( out == last )
+   for( Index i = 0 ; i < last ; ++i )
+    if( ( out == last ) || ( f_pool[ i ].theta < f_pool[ out ].theta ) )
+     out = i;
+  drop( f_pool[ out ] );
+  f_pool.erase( f_pool.begin() + out );
+  }
+
+ const Index last = f_pool.size() - 1;
+ const Index G = Index( f_xval.size() );
+
+ // the linearization error of each piece at the current iterate
+ std::vector< double > sigma( f_pool.size() , 0 );
+ for( Index i = 0 ; i < last ; ++i ) {
+  double s = double( fx ) - f_pool[ i ].c;
+  for( Index p = 0 ; p < G ; ++p )
+   s -= f_pool[ i ].g[ p ] * f_xval[ p ];
+  sigma[ i ] = s;
+  }
+
+ // the selection: the current piece, the active ones with the largest
+ // weights, then the others with the smallest errors while there is room
+ std::vector< bool > in( f_pool.size() , false );
+ in[ last ] = true;
+ std::vector< Index > ord;
+ for( Index i = 0 ; i < last ; ++i )
+  if( f_pool[ i ].theta > theta_min )
+   ord.push_back( i );
+ std::sort( ord.begin() , ord.end() , [ & ]( Index a , Index b ) {
+  return( f_pool[ a ].theta > f_pool[ b ].theta ); } );
+ int room = m - 1;
+ for( Index k = 0 ; ( k < ord.size() ) && ( int( k ) < mact ) ; ++k ) {
+  in[ ord[ k ] ] = true;
+  --room;
+  }
+ ord.clear();
+ for( Index i = 0 ; i < last ; ++i )
+  if( ! in[ i ] )
+   ord.push_back( i );
+ std::sort( ord.begin() , ord.end() , [ & ]( Index a , Index b ) {
+  return( sigma[ a ] < sigma[ b ] ); } );
+ for( Index k = 0 ; ( k < ord.size() ) && ( room > 0 ) ; ++k , --room )
+  in[ ord[ k ] ] = true;
+
+ // what is not selected leaves the master, then what is selected and not
+ // there enters it, in the slots that have been freed
+ for( Index i = 0 ; i < f_pool.size() ; ++i )
+  if( ! in[ i ] )
+   drop( f_pool[ i ] );
+ for( Index i = 0 ; i < f_pool.size() ; ++i ) {
+  if( ! in[ i ] )
+   continue;
+  ++f_pool[ i ].n_sel;
+  if( f_pool[ i ].slot >= 0 )
+   continue;
+  int slot = 0;
+  while( f_slot_used[ slot ] )
+   ++slot;
+  f_slot_used[ slot ] = true;
+  f_pool[ i ].slot = slot;
+  std::vector< double > gi( f_pool[ i ].g );
+  f_mpb->add_cut( 0 , slot , std::move( gi ) , f_pool[ i ].c );
+  }
+ }
+
+/*--------------------------------------------------------------------------*/
+
 void FrankWolfeSolver::master_direction( OFValue fx )
 {
  if( ! f_mpb )
@@ -992,21 +1143,36 @@ void FrankWolfeSolver::master_direction( OFValue fx )
  for( Index p = 0 ; p < G ; ++p )
   alpha -= g[ p ] * f_xval[ p ];
 
- if( f_mpb->add_cut( 0 , std::move( g ) , alpha ) < 0 ) {
-  // the bundle is full: the oldest piece makes room for the new one
-  f_mpb->remove_cut( 0 , f_next_slot );
-  std::vector< double > gg( f_grad.begin() , f_grad.end() );
-  f_mpb->add_cut( 0 , f_next_slot , std::move( gg ) , alpha );
+ if( f_cut_policy == eCutRelevant )
+  relevant_cuts( fx , std::move( g ) , alpha );
+ else {
+  if( f_mpb->add_cut( 0 , std::move( g ) , alpha ) < 0 ) {
+   // the bundle is full: the oldest piece makes room for the new one
+   f_mpb->remove_cut( 0 , f_next_slot );
+   std::vector< double > gg( f_grad.begin() , f_grad.end() );
+   f_mpb->add_cut( 0 , f_next_slot , std::move( gg ) , alpha );
+   }
+  f_next_slot = ( f_next_slot + 1 ) % std::max( f_bundle_size , 2 );
   }
- f_next_slot = ( f_next_slot + 1 ) % std::max( f_bundle_size , 2 );
 
  f_mpb->set_t( stab_weight() );
 
  if( f_mpb->solve_master() < Solver::kOK ) {
   p_dir = & f_grad;                     // the master says nothing: the
   f_sigma = 0;                          // gradient is always a fallback
+  for( auto & pc : f_pool )
+   pc.theta = 0;
   return;
   }
+
+ // the weights of the pieces, which the next selection starts from, and
+ // how many of them are positive
+ for( auto & pc : f_pool )
+  pc.theta = ( pc.slot >= 0 ) ? f_mpb->get_theta( 0 , pc.slot ) : 0;
+ f_n_support = 0;
+ for( double th : f_mpb->get_thetas( 0 ) )
+  if( th > 1e-9 )
+   ++f_n_support;
 
  const auto z = f_mpb->get_aggregated_subgradient( 0 );
  if( z.size() < G ) {
@@ -1035,6 +1201,7 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
  // the direction is the gradient unless one is built below, and the gradient
  // is a subgradient with no error at all
  f_sigma = 0;
+ f_n_support = 1;
 
  if( f_direction == eDirBundleMP ) {
   master_direction( fx );
@@ -1046,6 +1213,11 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
 
  if( f_direction == eDirAggregate ) {
   aggregate_direction( fx );
+  return;
+  }
+
+ if( f_direction == eDirPrimalDual ) {
+  primal_dual_direction( fx );
   return;
   }
 
@@ -1099,6 +1271,7 @@ void FrankWolfeSolver::bundle_direction( OFValue fx )
    for( Index p = 0 ; p < G ; ++p )
     f_bdir[ p ] = f_grad[ p ] + theta * ( f_pgrad[ p ] - f_grad[ p ] );
    p_dir = & f_bdir;
+   f_n_support = ( theta < 1 ) ? 2 : 1;
 
    // the direction is the combination of a linearization with error 0, the
    // gradient here, and one with error alpha, so it is a sigma*-subgradient
@@ -1172,6 +1345,7 @@ void FrankWolfeSolver::aggregate_direction( OFValue fx )
     f_bdir[ p ] = f_grad[ p ] + lambda * ( f_agg[ p ] - f_grad[ p ] );
    p_dir = & f_bdir;
    f_sigma = lambda * sigma;
+   f_n_support = ( lambda < 1 ) ? 2 : 1;
    }
   else
    p_dir = & f_grad;
@@ -1186,6 +1360,227 @@ void FrankWolfeSolver::aggregate_direction( OFValue fx )
   p_dir = & f_grad;
   f_agg.assign( f_grad.begin() , f_grad.end() );
   f_agg_b = bc;
+  }
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::primal_dual_direction( OFValue fx )
+{
+ const Index G = Index( f_grad.size() );
+
+ /* The two pieces are those of aggregate_direction(), the gradient g at the
+  * current iterate x with error 0 and the aggregate a with error sigma, and
+  * mu is the weight of g. With w the vertex the oracle has given for a, the
+  * gap the direction z = a + mu ( g - a ) gives is at most
+  *
+  *   ( 1 - mu ) sigma + < z , x - w > + sum_j || z_j - a_j ||^2 / ( 2 k_j )
+  *
+  * k_j = || a_j || / R_j being how fast < a_j , . > grows away from w_j on
+  * the ball of radius R_j of the sub-Block j (or the same coordinate by
+  * coordinate on a box), and z - a = mu ( g - a ): the minimum over mu in
+  * [ 0 , 1 ] of this convex quadratic is written down at once, and with
+  * mu = 0 the bound is the one a gave. */
+
+ // the constant of the piece of the gradient at x: f( x ) - < g , x >
+ OFValue bc = fx;
+ for( Index p = 0 ; p < G ; ++p )
+  bc -= f_grad[ p ] * f_xval[ p ];
+
+ OFValue mu = 1;
+ if( ( f_agg.size() == G ) && ( f_pd_w.size() == G ) ) {
+  // what is below 0 is numerical noise
+  OFValue sigma = fx - f_agg_b;
+  for( Index p = 0 ; p < G ; ++p )
+   sigma -= f_agg[ p ] * f_xval[ p ];
+  if( sigma < 0 )
+   sigma = 0;
+
+  // the slope at mu = 0 of the linear part, and the curvature
+  OFValue slope = - sigma;
+  for( Index p = 0 ; p < G ; ++p )
+   slope += ( f_grad[ p ] - f_agg[ p ] ) * ( f_xval[ p ] - f_pd_w[ p ] );
+
+  /* With d_j = g_j - a_j, b_j = 2 || a_j + c_j || and D_j the diameter of
+   * the feasible region of the sub-Block j (2 R_j for a ball, u_i - l_i for
+   * a coordinate of a box, taken one by one), the growth of < a_j , . >
+   * away from w_j gives, at distance s <= D_j,
+   *
+   *   < z_j - a_j , w_j - v_j > - < a_j , v_j - w_j >
+   *     <= mu || d_j || s - ( b_j / ( 2 D_j ) ) s^2 ,
+   *
+   * whose maximum over s in [ 0 , D_j ] is the quadratic of the closed form
+   * when mu || d_j || <= b_j and the linear mu || d_j || D_j - b_j D_j / 2
+   * past it. Each term is convex in mu and stays finite as a_j + c_j goes
+   * to 0, where it is just mu || d_j || D_j: the master is the minimum over
+   * mu in [ 0 , 1 ] of the slope times mu plus their sum, whose derivative
+   * is nondecreasing and piecewise linear with a kink at mu = b_j / || d_j ||
+   * for each term. c is the cost of the sub-Block the oracle is given; on a
+   * ball whose sub-Block has Variable the father does not see, the norm of
+   * a + c is taken on those the father sees, which only makes b_j smaller */
+  struct Term { OFValue kink , n , D , b; };
+  std::vector< Term > terms;
+  for( Index j = 0 ; j < f_nsb ; ++j ) {
+   const bool ball = ( f_pd_radius[ j ] > 0 );
+   OFValue na = 0 , nd = 0;
+   for( auto p : v_sb[ j ].grad_idx ) {
+    const auto di = f_grad[ p ] - f_agg[ p ];
+    const auto ap = f_agg[ p ] + f_pd_cost[ p ];   // what the oracle sees
+    if( ball ) {
+     na += ap * ap;
+     nd += di * di;
+     }
+    else
+     if( ( di != 0 ) && ( f_pd_width[ p ] > 0 ) ) {
+      const OFValue n = std::abs( di ) , b = 2 * std::abs( ap );
+      terms.push_back( { b / n , n , f_pd_width[ p ] , b } );
+      }
+    }
+   if( nd > 0 ) {
+    const OFValue n = std::sqrt( nd ) , b = 2 * std::sqrt( na );
+    terms.push_back( { b / n , n , 2 * f_pd_radius[ j ] , b } );
+    }
+   }
+
+  // the derivative at mu is slope + sum_j n_j D_j over the terms already
+  // linear (kink <= mu) + mu sum_j n_j^2 D_j / b_j over the others
+  std::sort( terms.begin() , terms.end() ,
+             []( const Term & l , const Term & r ) {
+              return( l.kink < r.kink ); } );
+  OFValue A = slope , B = 0;
+  for( const auto & tm : terms )
+   if( tm.b > 0 )
+    B += tm.n * tm.n * tm.D / tm.b;
+  mu = 1;
+  OFValue lo = 0;
+  for( std::size_t k = 0 ; ; ++k ) {
+   const OFValue hi = ( k < terms.size() ) ?
+                      std::min( terms[ k ].kink , OFValue( 1 ) ) : 1;
+   if( hi > lo ) {
+    if( A + B * lo >= 0 ) { mu = lo; break; }
+    if( A + B * hi >= 0 ) { mu = - A / B; break; }
+    }
+   if( ( k >= terms.size() ) || ( terms[ k ].kink >= 1 ) )
+    break;
+   const auto & tm = terms[ k ];
+   A += tm.n * tm.D;
+   if( tm.b > 0 )
+    B -= tm.n * tm.n * tm.D / tm.b;
+   lo = std::max( lo , tm.kink );
+   }
+  if( ( mu > 0 ) && ( mu < 1 ) && ( A + B * mu < 0 ) )
+   mu = 1;   // only rounding can get here
+  if( mu < 0 )
+   mu = 0;
+
+  if( mu < 1 ) {
+   f_bdir.resize( G );
+   for( Index p = 0 ; p < G ; ++p )
+    f_bdir[ p ] = f_agg[ p ] + mu * ( f_grad[ p ] - f_agg[ p ] );
+   p_dir = & f_bdir;
+   f_sigma = ( 1 - mu ) * sigma;
+   f_n_support = ( mu > 0 ) ? 2 : 1;
+   f_agg = f_bdir;
+   f_agg_b = bc + ( 1 - mu ) * ( f_agg_b - bc );
+   return;
+   }
+  }
+
+ // no aggregate yet, or the master chose the gradient: the aggregate is its
+ // piece
+ p_dir = & f_grad;
+ f_agg.assign( f_grad.begin() , f_grad.end() );
+ f_agg_b = bc;
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::analyze_sets( void )
+{
+ f_pd_radius.assign( f_nsb , 0 );
+ f_pd_width.assign( f_fun->get_num_active_var() , 0 );
+ f_pd_cost.assign( f_fun->get_num_active_var() , 0 );
+
+ // the oracle minimizes a linear function, the direction plus the cost of
+ // the sub-Block when intLMOObj puts it in, and that cost moves the vector
+ // whose growth is bounded below by the same amount for all the pieces
+ const bool alpha = ( f_lmo_obj == LMOFull );
+
+ for( Index j = 0 ; j < f_nsb ; ++j ) {
+  const auto & d = v_sb[ j ];
+  bool ok = ( d.lin || ( d.dq && ( f_lmo_obj == LMOLinear ) ) ) &&
+            d.block->get_nested_Blocks().empty();
+  if( ok && alpha )
+   for( Index k = 0 ; k < Index( d.obj_idx.size() ) ; ++k )
+    f_pd_cost[ d.grad_idx[ k ] ] = d.c0[ d.obj_idx[ k ] ];
+
+  // the ball q || x ||^2 + < l , x > + k <= r, whose centre is - l / 2 q and
+  // whose radius is sqrt( ( r - k ) / q + || l ||^2 / 4 q^2 ), or the box
+  // given by the bounds of all the Variable
+  Index nballs = 0;
+  OFValue R2 = 0;
+  std::unordered_map< const Variable * , OFValue > width;
+  const std::function< void( Constraint & ) > visit = [ & ]( Constraint & c ) {
+   if( auto ov = dynamic_cast< OneVarConstraint * >( & c ) ) {
+    const bool lo = ov->get_lhs() > - Inf< RowConstraint::RHSValue >();
+    const bool up = ov->get_rhs() < Inf< RowConstraint::RHSValue >();
+    if( lo && up )
+     width[ ov->get_active_var( 0 ) ] = ov->get_rhs() - ov->get_lhs();
+    else
+     if( lo || up )
+      ok = false;
+    return;
+    }
+   auto fr = dynamic_cast< FRowConstraint * >( & c );
+   auto dq = fr ? dynamic_cast< DQuadFunction * >( fr->get_function() )
+                : nullptr;
+   if( ( ! dq ) || dynamic_cast< QuadFunction * >( dq ) ||
+       ( fr->get_lhs() > - Inf< RowConstraint::RHSValue >() ) ||
+       ( fr->get_rhs() >= Inf< RowConstraint::RHSValue >() ) ||
+       ( ! dq->get_num_active_var() ) ) {
+    ok = false;
+    return;
+    }
+   const OFValue q = dq->get_quadratic_coefficient( 0 );
+   OFValue l2 = 0;
+   for( Index i = 0 ; i < dq->get_num_active_var() ; ++i ) {
+    if( ( ! ( q > 0 ) ) ||
+        ( std::abs( dq->get_quadratic_coefficient( i ) - q ) > 1e-12 * q ) ) {
+     ok = false;
+     return;
+     }
+    l2 += dq->get_linear_coefficient( i ) * dq->get_linear_coefficient( i );
+    }
+   R2 = ( fr->get_rhs() - dq->get_constant_term() ) / q + l2 / ( 4 * q * q );
+   ++nballs;
+   };
+
+  if( ok ) {
+   for( const auto & g : d.block->get_static_constraint_groups() )
+    g->for_each( visit );
+   for( const auto & g : d.block->get_dynamic_constraint_groups() )
+    g->for_each( visit );
+   }
+
+  if( ok && ( nballs == 1 ) && width.empty() && ( R2 > 0 ) ) {
+   f_pd_radius[ j ] = std::sqrt( R2 );
+   continue;
+   }
+
+  if( ok && ( ! nballs ) ) {
+   for( auto p : d.grad_idx ) {
+    auto it = width.find( f_fun->get_active_var( p ) );
+    if( it == width.end() ) { ok = false; break; }
+    f_pd_width[ p ] = it->second;
+    }
+   }
+  else
+   ok = false;
+
+  if( ! ok )
+   throw( std::invalid_argument( "FrankWolfeSolver::analyze_sets: "
+           "intFWDirection eDirPrimalDual needs every sub-Block to be a "
+           "Euclidean ball or a box, with an oracle of a linear function" ) );
   }
  }
 
@@ -1263,7 +1658,7 @@ void FrankWolfeSolver::scatter( void )
    std::vector< std::pair< Index , FunctionValue > > upd( d.obj_idx.size() );
    for( Index k = 0 ; k < d.obj_idx.size() ; ++k )
     upd[ k ] = { d.obj_idx[ k ] ,
-                 d.c0[ d.obj_idx[ k ] ] + dir[ d.grad_idx[ k ] ] };
+                 d.c0[ d.obj_idx[ k ] ] + dir[ d.grad_idx[ k ] ] / d.w };
    std::sort( upd.begin() , upd.end() );
    Function::Subset nms( upd.size() );
    Function::Vec_FunctionValue nc( upd.size() );
@@ -1284,7 +1679,7 @@ void FrankWolfeSolver::scatter( void )
    for( Index i = 0 ; i < n ; ++i )
     nc[ i ] = d.c0[ i ];
   for( Index k = 0 ; k < d.obj_idx.size() ; ++k )
-   nc[ d.obj_idx[ k ] ] += dir[ d.grad_idx[ k ] ];
+   nc[ d.obj_idx[ k ] ] += dir[ d.grad_idx[ k ] ] / d.w;
 
   if( d.dq )
    d.dq->modify_linear_coefficients( std::move( nc ) ,
@@ -1298,11 +1693,13 @@ void FrankWolfeSolver::scatter( void )
 
 void FrankWolfeSolver::run_LMOs( bool changedvars )
 {
+ ++f_n_lmo;
+
  // run one LMO ( solve + materialize the vertex into the sub-Block variables )
  auto run_one = [ changedvars ]( SubBlockData & d ) {
   try {
    d.status = d.lmo->compute( changedvars );
-   d.value  = d.lmo->get_var_value();   // M_j(v_j)
+   d.value  = d.w * d.lmo->get_var_value();   // M_j(v_j), weighted
    d.lmo->get_var_solution();           // materialize v_j into the variables
    }
   catch( ... ) { d.excp = std::current_exception(); }
@@ -1619,7 +2016,7 @@ void FrankWolfeSolver::recompute_atom_costs( void )
   OFValue ci = 0;
   for( auto & d : v_sb ) {
    d.fun->compute( true );
-   ci += d.fun->get_value();
+   ci += d.w * d.fun->get_value();
    }
   a.f_ci = ci;
   }
@@ -1640,6 +2037,9 @@ int FrankWolfeSolver::compute( bool changedvars )
  if( ( f_init_point == eInitBlock ) && ( f_algorithm != AlgVanilla ) )
   throw( std::invalid_argument( "FrankWolfeSolver::compute: intInitPoint "
                                 "eInitBlock needs intAlgorithm AlgVanilla" ) );
+ if( ( f_direction == eDirPrimalDual ) && ( f_algorithm != AlgVanilla ) )
+  throw( std::invalid_argument( "FrankWolfeSolver::compute: intFWDirection "
+                          "eDirPrimalDual needs intAlgorithm AlgVanilla" ) );
 
  // lock the Solver against concurrent compute() from other threads: every
  // Solver has an internal recursive mutex (see Solver::lock()). It is released
@@ -1671,6 +2071,10 @@ int FrankWolfeSolver::compute( bool changedvars )
     if( d.dq )
      throw( std::logic_error( "FrankWolfeSolver: LMOLinear requires "
       "LinearFunction sub-Block objectives; use LMOQuad/LMOFull otherwise" ) );
+
+  // the balls and the boxes of eDirPrimalDual, read before anything changes
+  if( f_direction == eDirPrimalDual )
+   analyze_sets();
   }
  catch( ... ) {
   if( ! owned )
@@ -1706,7 +2110,16 @@ int FrankWolfeSolver::compute( bool changedvars )
    }
   } guard{ this };
 
- f_n_accepted = f_n_rejected = f_n_corrected = 0;
+ // the values in the log with all the digits that tell two runs apart, the
+ // precision the stream had being given back on every way out of the method
+ struct PrecisionGuard {
+  std::ostream * log;
+  std::streamsize prec;
+  ~PrecisionGuard() { if( log ) log->precision( prec ); }
+  } pguard{ f_log , f_log ? f_log->precision( 12 ) : 0 };
+
+ f_n_accepted = f_n_rejected = f_n_corrected = f_n_lmo = 0;
+ f_last_step.clear();
  f_best_bound = f_max ? Inf< OFValue >() : - Inf< OFValue >();
 
  // the pieces kept from a previous compute() are linearizations of the
@@ -1715,6 +2128,8 @@ int FrankWolfeSolver::compute( bool changedvars )
  // are not valid, and they are dropped
  f_pgrad.clear();
  f_agg.clear();
+ f_pd_w.clear();
+ drop_master();
 
  int status;
  try {
@@ -1758,6 +2173,7 @@ int FrankWolfeSolver::compute( bool changedvars )
    if( f_n_corrected )
     *f_log << " (" << f_n_corrected << " corrected)";
    }
+  *f_log << ", LMO " << f_n_lmo;
   *f_log << std::endl;
   }
 
@@ -1803,7 +2219,7 @@ Solver::OFValue FrankWolfeSolver::eval_modified_objective( void )
  OFValue s = 0;
  for( auto & d : v_sb ) {
   d.fun->compute( true );
-  s += d.fun->get_value();
+  s += d.w * d.fun->get_value();
   }
  return( s );
  }
@@ -1940,6 +2356,13 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   f_has_sol = true;
   }
 
+ const bool primal_dual = ( f_direction == eDirPrimalDual );
+
+ // under eDirPrimalDual, whether the step of the previous iteration has been
+ // refused, leaving the iterate, the value and the gradient as they were
+ bool stay = false;
+ OFValue father_val = 0;
+
  int status = kStopIter;
  double lastETT = 0;            // last time the eEveryTTime events were fired
 
@@ -1961,9 +2384,12 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    }
 
   f_x->write( f_Block );
-  evaluate_gradient();
-  OFValue father_val = f_fun->get_value();
-  capture_father_values( f_xval );
+  if( ! stay ) {
+   evaluate_gradient();
+   father_val = f_fun->get_value();
+   capture_father_values( f_xval );
+   }
+  stay = false;
   bundle_direction( father_val );
 
   /* The oracle is asked with the direction, and asked again with the
@@ -1972,7 +2398,13 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    * is already small enough to stop [see the class documentation]. */
 
   OFValue mx_sum , mv_sum , cv , gx , cost_x , gap;
+  // what the step is taken along, for the per-iteration log: 'G' the
+  // gradient, 'B' the direction of the master, 'C' the same corrected, 'F'
+  // the gradient the oracle has been asked again with after a refusal, 'R'
+  // a step of eDirPrimalDual refused and not taken
+  const bool master_grad = ( p_dir == & f_grad );
   bool corrected = false;
+  bool fell_back = false;
   for( ; ; ) {
    scatter();
    mx_sum = eval_modified_objective();           // sum_j M_j(x_j)
@@ -1984,6 +2416,8 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    for( auto & d : v_sb )
     mv_sum += d.value;                            // sum_j M_j(v_j)
    capture_father_values( f_vval );
+   if( primal_dual )
+    f_pd_w = f_vval;                       // the vertex of the new aggregate
 
    gx = grad_dot( f_xval );               // <grad f_father(x), x>
    cv = mv_sum - dir_dot( f_vval );       // sum_j h_j(v_j)
@@ -2034,11 +2468,27 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
     gap = f_max ? ( f_best_bound - f_value ) : ( f_value - f_best_bound );
     }
 
+   // the decrease the gradient promises along the step towards the vertex
+   const OFValue dec = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
+
+   // under eDirPrimalDual and eRejStay the oracle is asked once: a step that
+   // does not pass the test is not taken, and what the trial has given is
+   // its new bound
+   if( primal_dual && ( f_on_reject == eRejStay ) ) {
+    if( small_gap( gap ) || ( ( dec > 0 ) && ( dec >= f_accept * gap ) ) ) {
+     if( p_dir != & f_grad )
+      ++f_n_accepted;
+     }
+    else {
+     ++f_n_rejected;
+     stay = true;
+     }
+    break;
+    }
+
    if( ( f_accept <= 0 ) || ( p_dir == & f_grad ) || small_gap( gap ) )
     break;
 
-   // the decrease the gradient promises along the step towards the vertex
-   const OFValue dec = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
    if( dec >= f_accept * gap ) {
     ++f_n_accepted;
     break;
@@ -2047,21 +2497,33 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    // refused: corrected once, if intFWOnReject asks for it and the direction
    // still decreases the function, else the gradient
    ++f_n_rejected;
-   if( ( ! corrected ) && correct_direction( dec , cert ) ) {
+   if( ( ! corrected ) && correct_direction( dec , cert ) )
     corrected = true;
-    continue;
+   else {
+    p_dir = & f_grad;
+    f_sigma = 0;
+    fell_back = true;
     }
-   p_dir = & f_grad;
-   f_sigma = 0;
+
+   // under eDirPrimalDual the direction the oracle is now asked with is the
+   // new aggregate, its vertex being the one the next trial gives
+   if( primal_dual ) {
+    f_agg = *p_dir;
+    f_agg_b = father_val - dir_dot( f_xval ) - f_sigma;
+    }
    }
 
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
 
   f_niter = t; f_last_gap = gap;             // for the final-summary log
 
+  const char dir_kind = stay ? 'R' : fell_back ? 'F' : corrected ? 'C'
+                       : ( master_grad || is_gradient( *p_dir ) ) ? 'G' : 'B';
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
    *f_log << "  FW it " << t << ": value " << f_value << ", gap " << gap
-          << std::endl;
+          << ", dir " << dir_kind << ", LMO " << f_n_lmo
+          << ", pieces " << f_n_support << ", bound " << f_bound
+          << ", time " << elapsed() << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
   if( ( gap <= rel_thr ) ||
@@ -2079,6 +2541,10 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
     }
    }
 
+  // a refused step of eDirPrimalDual is not taken
+  if( stay )
+   continue;
+
   OFValue gamma;
   if( exact ) {
    OFValue gd = mv_sum - cost_x;                 // d/dgamma at gamma=0 ( <0 good )
@@ -2095,6 +2561,9 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
     gamma = f_step;
    else
     gamma = OFValue( 2 ) / OFValue( t + 2 );     // Agnostic open-loop rule
+
+  if( f_log && ( f_log_verb >= 2 ) )         // x_{k+1} - x_k = gamma ( v - x )
+   log_step( gamma , f_vval , f_xval );
 
   // x <- ( 1 - gamma ) x + gamma v ; cbar <- ( 1 - gamma ) cbar + gamma cv
   Solution * v_sol = f_Block->get_Solution( nullptr , false );
@@ -2227,7 +2696,12 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   OFValue mx_sum , mv_sum , gx , cost_x , fw_gap , away_gap , La_a;
   Index a_idx;
   double lambda_a;
+  // what the step is taken along, for the per-iteration log: 'G' the
+  // gradient, 'B' the direction of the master, 'C' the same corrected, 'F'
+  // the gradient the oracle has been asked again with after a refusal
+  const bool master_grad = ( p_dir == & f_grad );
   bool corrected = false;
+  bool fell_back = false;
   for( ; ; ) {
    scatter();
    mx_sum = eval_modified_objective();           // <grad F, x>
@@ -2331,21 +2805,26 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
    // refused: corrected once, if intFWOnReject asks for it and the direction
    // still decreases the function, else the gradient
    ++f_n_rejected;
-   if( ( ! corrected ) && correct_direction( dec , cert ) ) {
+   if( ( ! corrected ) && correct_direction( dec , cert ) )
     corrected = true;
-    continue;
+   else {
+    p_dir = & f_grad;
+    f_sigma = 0;
+    fell_back = true;
     }
-   p_dir = & f_grad;
-   f_sigma = 0;
    }
 
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
 
   f_niter = t; f_last_gap = fw_gap;          // for the final-summary log
 
+  const char dir_kind = fell_back ? 'F' : corrected ? 'C'
+                       : ( master_grad || is_gradient( *p_dir ) ) ? 'G' : 'B';
   if( f_log && ( f_log_verb >= 2 ) )         // per-iteration log
    *f_log << "  FW it " << t << ": value " << f_value << ", gap " << fw_gap
-          << ", |A| " << f_aset.size() << std::endl;
+          << ", |A| " << f_aset.size() << ", dir " << dir_kind
+          << ", LMO " << f_n_lmo << ", pieces " << f_n_support
+          << ", bound " << f_bound << ", time " << elapsed() << std::endl;
 
   OFValue rel_thr = f_rel_acc * std::max( OFValue( 1 ) , std::abs( f_value ) );
 
@@ -2404,6 +2883,9 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
    gamma = std::min( OFValue( gamma_max ) ,
                      f_line_search == LSFixed ? OFValue( f_step )
                      : OFValue( 2 ) / OFValue( t + 2 ) );
+
+  if( f_log && ( f_log_verb >= 2 ) )         // x_{k+1} - x_k = - gamma d
+   log_step( gamma , *dfrom , *dto );
 
   // apply the step: update the iterate and the active set - - - - - - - - - -
 
@@ -2467,6 +2949,52 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
 
 /*--------------------------------------------------------------------------*/
 /*---------------------- READING THE SOLUTION ------------------------------*/
+/*--------------------------------------------------------------------------*/
+
+bool FrankWolfeSolver::is_gradient( const std::vector< FunctionValue > & dir )
+ const
+{
+ // the master may give the gradient itself, e.g., when all its weight is on
+ // the current cut: it is told apart up to the round-off of the master
+ if( dir.size() != f_grad.size() )
+  return( false );
+ double ng = 0 , nd = 0;
+ for( Index i = 0 ; i < dir.size() ; ++i ) {
+  ng = std::max( ng , double( std::abs( f_grad[ i ] ) ) );
+  nd = std::max( nd , double( std::abs( dir[ i ] - f_grad[ i ] ) ) );
+  }
+ return( nd <= 1e-9 * std::max( ng , 1.0 ) );
+ }
+
+/*--------------------------------------------------------------------------*/
+
+void FrankWolfeSolver::log_step( OFValue gamma ,
+                                 const std::vector< FunctionValue > & from ,
+                                 const std::vector< FunctionValue > & to )
+{
+ // the step is gamma ( from - to ) in the father Variable, and its cosine
+ // with the previous one tells how much the iterates zig-zag; a null step
+ // has no cosine, and it is not the previous one of the next step
+ std::vector< FunctionValue > step( from.size() );
+ double nn = 0 , np = 0 , dp = 0;
+ for( Index i = 0 ; i < step.size() ; ++i ) {
+  step[ i ] = gamma * ( from[ i ] - to[ i ] );
+  nn += step[ i ] * step[ i ];
+  }
+ *f_log << "    step " << gamma << ", |d| " << std::sqrt( nn );
+ if( nn > 0 ) {
+  if( f_last_step.size() == step.size() ) {
+   for( Index i = 0 ; i < step.size() ; ++i ) {
+    np += f_last_step[ i ] * f_last_step[ i ];
+    dp += f_last_step[ i ] * step[ i ];
+    }
+   *f_log << ", cos " << dp / std::sqrt( nn * np );
+   }
+  f_last_step = std::move( step );
+  }
+ *f_log << std::endl;
+ }
+
 /*--------------------------------------------------------------------------*/
 
 Solver::OFValue FrankWolfeSolver::get_var_value( void ) { return( f_value ); }

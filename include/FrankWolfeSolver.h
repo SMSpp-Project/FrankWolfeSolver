@@ -287,13 +287,22 @@ class FrankWolfeSolver : public CDASolver
   eDirGradient = 0 ,  ///< the gradient at the current iterate
   eDirBundle   = 1 ,  ///< the master of two pieces, solved in closed form
   eDirBundleMP = 2 ,  ///< the master of a bundle, a MasterProblemBlock
-  eDirAggregate = 3   ///< the current piece and the aggregate of the older
+  eDirAggregate = 3 , ///< the current piece and the aggregate of the older
+  eDirPrimalDual = 4  ///< the same, the master bounding the gap [see below]
   };
 
  /// what a refused bundle direction is replaced by (value of intFWOnReject)
  enum reject_type {
   eRejGradient = 0 ,  ///< the gradient, i.e. the by-the-book step
-  eRejCorrect  = 1    ///< the combination of the two that passes the test
+  eRejCorrect  = 1 ,  ///< the combination of the two that passes the test
+  eRejStay     = 2    ///< no step, the oracle not asked again [eDirPrimalDual]
+  };
+
+/*--------------------------------------------------------------------------*/
+ /// which pieces the master problem of eDirBundleMP keeps (intFWCutPolicy)
+ enum cut_policy_type {
+  eCutOldest   = 0 ,  ///< the newest ones, the oldest making room
+  eCutRelevant = 1    ///< the active and the tightest ones, out of a pool
   };
 
 /*--------------------------------------------------------------------------*/
@@ -475,6 +484,49 @@ class FrankWolfeSolver : public CDASolver
    *   factor and the master chooses the same direction again, so that
    *   without the test the method may stay at the same iterate for good.
    *
+   * - eDirPrimalDual: the primal-dual bundle Frank-Wolfe method, whose
+   *   master problem of the same two pieces minimizes an upper
+   *   bound on the gap the direction gives instead of the stabilized one.
+   *   With a the aggregate, w_a the vertex the oracle has given for it,
+   *   sigma its error at the current iterate x, g the gradient and, for
+   *   the sub-Block j, kappa_j the constant for which
+   *   < a_j , v_j - w_a,j > >= ( kappa_j / 2 ) || v_j - w_a,j ||^2 for
+   *   every v_j of its feasible region and D_j the diameter of that
+   *   region, the master is
+   *
+   *     min { ( 1 - mu ) sigma + < a + mu ( g - a ) , x - w_a >
+   *           + sum_j psi_j( mu || g_j - a_j || ) : mu in [ 0 , 1 ] } ,
+   *
+   *   psi_j( r ) = max { r s - ( kappa_j / 2 ) s^2 : s in [ 0 , D_j ] }
+   *   being r^2 / ( 2 kappa_j ) for r <= kappa_j D_j and linear past it,
+   *   so that each term stays finite as kappa_j goes to 0,
+   *   and mu = 0, i.e. the aggregate alone, gives back the bound it gave
+   *   before: the bound f( x ) - U of the iteration never decreases. The
+   *   step towards the vertex is taken if it passes the test of
+   *   dblFWAccept; otherwise intFWOnReject says what is done, and the
+   *   direction the oracle is asked with last becomes the aggregate the
+   *   next master starts from. Under eRejStay the iterate stays where it
+   *   is (also when the step does not decrease the function, whatever
+   *   dblFWAccept), nothing is evaluated anew and the oracle is not asked
+   *   again, the refused direction being the aggregate. The constants are
+   *   known for a
+   *   sub-Block whose feasible region is a Euclidean ball of radius R_j,
+   *   where kappa_j = || a_j || / R_j, and for a box, a product of
+   *   intervals [ l_i , u_i ] each with its own constant
+   *   kappa_i = 2 | a_i | / ( u_i - l_i ), a being there the vector the
+   *   oracle is given, i.e. the aggregate plus the linear cost of the
+   *   sub-Block when intLMOObj is LMOFull. This direction needs every
+   *   sub-Block to be one of the two, with no nested Block and an oracle
+   *   of a linear function (a sub-Block with a quadratic objective only
+   *   under LMOLinear): a ball is one FRowConstraint on a DQuadFunction
+   *   with all its quadratic coefficients equal and positive and no finite
+   *   bound on the Variable, a box is finite bounds on all the Variable the
+   *   linking function has in the sub-Block and nothing else. It needs
+   *   intAlgorithm AlgVanilla. The constants of a box vanish along the
+   *   coordinates whose optimal value is inside their interval, the
+   *   gradient being 0 there, and the theory, which asks kappa_j > 0, no
+   *   longer holds: the terms of those coordinates are then linear in mu.
+   *
    * The information the second mode uses is the one the method has already
    * paid for: no evaluation is added [see the file documentation for where
    * these formulae come from]. */
@@ -508,7 +560,9 @@ class FrankWolfeSolver : public CDASolver
    * G / ( eta ( U - G ) ), whose step is known to pass the test; when it
    * does not decrease the function, the gradient is taken as in the first
    * case. Either way the cost is one more call to the oracle, and no further
-   * master problem. Has no effect when dblFWAccept is 0. */
+   * master problem. With eRejStay, only under eDirPrimalDual, no step is
+   * taken and the oracle is not asked again [see eDirPrimalDual]; elsewhere
+   * it is eRejGradient. Has no effect when dblFWAccept is 0. */
 
   intFWBestLB ,
   ///< whether the best bound found so far replaces the one of the iteration
@@ -519,6 +573,37 @@ class FrankWolfeSolver : public CDASolver
    * upper bound, for a maximization): U' <= U, so that the test accepts at
    * least the directions it accepted before and the method may stop sooner,
    * and get_lb() reports f_lb. */
+
+  intFWCutPolicy ,
+  ///< how the pieces of the master problem of eDirBundleMP are chosen
+  /**< One of the cut_policy_type values. With eCutOldest (default) the
+   * master keeps the intFWBundleSize newest pieces, the oldest making room
+   * for the gradient of the current iterate. With eCutRelevant the pieces
+   * are kept in a pool of intFWCutPool of them, and at each iteration the
+   * master is given (i) the gradient of the current iterate, (ii) up to
+   * intFWCutActive of the pieces with the largest weights in the previous
+   * master, and (iii) as many of the others as fit in intFWBundleSize, the
+   * ones with the smallest linearization error at the current iterate
+   * first, i.e. those the master would favour as t goes to 0. When the pool
+   * is full, the piece that goes is, among those that are neither the
+   * current one nor had a positive weight in the previous master, the one
+   * that has been given to the master the fewest times, the oldest if more
+   * than one. Has no effect under the other directions. */
+
+  intFWCutPool ,
+  ///< how many pieces the pool of intFWCutPolicy == eCutRelevant keeps
+  /**< The size of the pool the master problem of eDirBundleMP draws its
+   * pieces from under intFWCutPolicy == eCutRelevant; 0 (default) means
+   * intFWBundleSize, and a value below it is read as it. Has no effect
+   * under eCutOldest. */
+
+  intFWCutActive ,
+  ///< how many pieces with a positive weight eCutRelevant keeps at least
+  /**< The number of pieces with a positive weight in the previous master
+   * problem, the largest first, that intFWCutPolicy == eCutRelevant gives
+   * the master again, the current gradient aside; at most intFWBundleSize
+   * - 1 of them are, and a negative value (default -1) means half of that,
+   * rounded down. Has no effect under eCutOldest. */
 
   intLastParFWSlv  ///< first allowed parameter value for derived classes
   };
@@ -746,6 +831,10 @@ class FrankWolfeSolver : public CDASolver
  struct SubBlockData {
   Block * block = nullptr;          ///< the sub-Block
   FRealObjective * obj = nullptr;   ///< its FRealObjective
+  /// the weight of its Objective [see Block::set_objective_weight()]: the
+  /// direction written into it is divided by it, since the LMO does not see
+  /// it, and its values are multiplied by it
+  Function::FunctionValue w = 1;
   Function * fun = nullptr;         ///< its objective Function (Lin/DQuad/Quad)
   LinearFunction * lin = nullptr;   ///< == fun if a LinearFunction, else nullptr
   DQuadFunction * dq = nullptr;     ///< == fun if a [D]QuadFunction, else nullptr
@@ -897,6 +986,26 @@ class FrankWolfeSolver : public CDASolver
  void aggregate_direction( OFValue fx );
 
 /*--------------------------------------------------------------------------*/
+ /// the same, the master bounding the gap [see eDirPrimalDual]
+ /** Solves in closed form the master problem of eDirPrimalDual, out of the
+  * gradient at the current iterate, the aggregate, the vertex f_pd_w the
+  * oracle has given for it and the radii f_pd_radius, then replaces the
+  * aggregate with the combination just chosen. */
+
+ void primal_dual_direction( OFValue fx );
+
+/*--------------------------------------------------------------------------*/
+ /// the ball or the box of each sub-Block [see eDirPrimalDual]
+ /** Fills f_pd_radius with the radius of the Euclidean ball a sub-Block is,
+  * f_pd_width with the width of the interval of each Variable of the
+  * linking function in a sub-Block that is a box, and f_pd_cost with the
+  * cost of the sub-Block the oracle adds to it; throws
+  * std::invalid_argument if a sub-Block is neither, or its oracle does not
+  * minimize a linear function. */
+
+ void analyze_sets( void );
+
+/*--------------------------------------------------------------------------*/
  /// replaces a refused direction with one that passes the test, if it can
  /** Under intFWOnReject == eRejCorrect, given the decrease dec the gradient
   * promises towards the vertex of the refused direction and the bound cert
@@ -913,6 +1022,20 @@ class FrankWolfeSolver : public CDASolver
  void build_master( void );
 
 /*--------------------------------------------------------------------------*/
+ /// drops the MasterProblemBlock of eDirBundleMP and the pool of its pieces
+
+ void drop_master( void );
+
+/*--------------------------------------------------------------------------*/
+ /// gives the master of eDirBundleMP the pieces of intFWCutPolicy eCutRelevant
+ /** The gradient g of the current iterate, whose constant is c, enters the
+  * pool, which is pruned to intFWCutPool pieces; then the master is given g,
+  * the active pieces and the tightest ones [see intFWCutPolicy], fx being the
+  * value of the linking function at the current iterate. */
+
+ void relevant_cuts( OFValue fx , std::vector< double > && g , double c );
+
+/*--------------------------------------------------------------------------*/
  /// evaluate the father Objective at the current point and fill f_grad
  void evaluate_gradient( void );
 
@@ -921,6 +1044,15 @@ class FrankWolfeSolver : public CDASolver
 
  /// run all the sub-Block LMO and collect v_j and M_j(v_j) into v_sb
  void run_LMOs( bool changedvars );
+
+ /// tells whether dir is the gradient, up to the round-off of the master
+ bool is_gradient( const std::vector< Function::FunctionValue > & dir ) const;
+
+ /// writes on the log the step gamma ( from - to ) taken in the father
+ /// Variable, its norm and its cosine with the previous one
+ void log_step( OFValue gamma ,
+                const std::vector< Function::FunctionValue > & from ,
+                const std::vector< Function::FunctionValue > & to );
 
  /// vanilla Frank-Wolfe loop (no active set)
  int compute_vanilla( bool changedvars );
@@ -1003,6 +1135,24 @@ class FrankWolfeSolver : public CDASolver
  ///< strFWMPBCfg, the BlockSolverConfig of the Solver of that master
 
  int f_next_slot = 0;
+
+ int f_cut_policy;     ///< intFWCutPolicy, eCutOldest or eCutRelevant
+ int f_cut_pool;       ///< intFWCutPool, the size of the pool of pieces
+ int f_cut_active;     ///< intFWCutActive, the active pieces kept at least
+
+ /// a piece of the pool of intFWCutPolicy == eCutRelevant
+ struct PoolCut {
+  std::vector< double > g;  ///< the gradient
+  double c;                 ///< the constant, f( x_i ) - < g , x_i >
+  double theta = 0;         ///< the weight in the last master it was in
+  int slot = -1;            ///< the slot in the master, -1 if not there
+  Index n_sel = 0;          ///< how many times the master has been given it
+  Index born = 0;           ///< when it entered the pool
+  };
+
+ std::vector< PoolCut > f_pool;  ///< the pool of eCutRelevant
+ std::vector< bool > f_slot_used;  ///< which slots of the master are taken
+ Index f_cut_count = 0;          ///< the pieces that have entered the pool
  ///< which slot of the bundle the next piece takes when it is full
  int f_max_thread;     ///< intMaxThread
  int f_max_iter;       ///< intMaxIter
@@ -1019,6 +1169,12 @@ class FrankWolfeSolver : public CDASolver
  Index f_n_accepted = 0;   ///< bundle directions taken in the last compute()
  Index f_n_rejected = 0;   ///< bundle directions refused in the last compute()
  Index f_n_corrected = 0;  ///< refused directions corrected [intFWOnReject]
+ Index f_n_lmo = 0;        ///< calls to the LMOs in the last compute()
+ Index f_n_support = 1;    ///< pieces with a positive weight in the master
+
+ /// father values of the last step x_{k+1} - x_k, for the cosine of two
+ /// consecutive steps in the per-iteration log (intLogVerb 2)
+ std::vector< Function::FunctionValue > f_last_step;
 
  // problem structure - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
@@ -1052,6 +1208,18 @@ class FrankWolfeSolver : public CDASolver
 
  std::vector< Function::FunctionValue > f_agg;    ///< the aggregate piece
  OFValue f_agg_b = 0;  ///< its constant: the piece is f_agg_b + < f_agg , x >
+
+ std::vector< Function::FunctionValue > f_pd_w;
+ ///< the vertex the oracle has given for f_agg [see eDirPrimalDual]
+
+ std::vector< OFValue > f_pd_radius;
+ ///< the radius of the ball of each sub-Block, 0 for a box [eDirPrimalDual]
+
+ std::vector< OFValue > f_pd_width;
+ ///< u - l for each Variable of the linking function in a box [the same]
+
+ std::vector< OFValue > f_pd_cost;
+ ///< the cost of the sub-Block the oracle adds to each of them [the same]
  std::vector< Function::FunctionValue > f_xval;  ///< father active-var values at x
  std::vector< Function::FunctionValue > f_vval;  ///< father active-var values at v
 

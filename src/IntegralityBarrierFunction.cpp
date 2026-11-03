@@ -229,7 +229,8 @@ void IntegralityBarrierFunction::set_psi( int psi , ModParam issueMod )
 
 void IntegralityBarrierFunction::everything_changed( ModParam issueMod )
 {
- if( ( ! f_Observer ) || ( ! f_Observer->issue_mod( issueMod ) ) )
+ if( ( ! f_Observer ) ||
+     ( ! f_Observer->issue_mod( issueMod , Function::eModFValues ) ) )
   return;
  f_Observer->add_Modification( std::make_shared< FunctionMod >( this ) ,
 			       Observer::par2chnl( issueMod ) );

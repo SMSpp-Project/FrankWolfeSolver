@@ -1,5 +1,11 @@
 # FrankWolfeSolver
 
+[![Pipeline](https://gitlab.com/smspp/frankwolfesolver/badges/develop/pipeline.svg)](https://gitlab.com/smspp/frankwolfesolver/-/pipelines?ref=develop)
+[![Release](https://gitlab.com/smspp/frankwolfesolver/-/badges/release.svg)](https://gitlab.com/smspp/frankwolfesolver/-/releases)
+[![Documentation](https://img.shields.io/badge/docs-Doxygen-blue)](https://smspp.gitlab.io/smspp-project/)
+[![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
+[![License: LGPL v3](https://img.shields.io/badge/License-LGPL_v3-blue.svg)](https://www.gnu.org/licenses/lgpl-3.0)
+
 Definition and implementation of the `FrankWolfeSolver` class, which implements
 the `CDASolver` interface within the SMS++ framework with a family of
 Frank-Wolfe (conditional gradient) type algorithms, ported as closely as
@@ -91,22 +97,11 @@ iterate, or the vertex the oracle gives, is feasible.
 These instructions will let you build `FrankWolfeSolver`.
 
 
-The module also comes ready-made, in any of
-
-```sh
-sudo add-apt-repository ppa:smspp-project/smspp   # Ubuntu
-sudo apt install libsmspp-frankwolfe-dev
-
-conda install -c conda-forge smspp-project        # Linux, macOS, Windows
-
-brew tap SMSpp-Project/smspp                      # macOS, Linux
-brew install smspp
-
-vcpkg install "smspp[core,frankwolfe]"            # from the sources
-```
-
-where apt and the port give the module alone, while conda and the tap carry
-the whole framework. What follows is about building it yourself.
+The module also comes ready-made: on Ubuntu as `libsmspp-frankwolfe-dev`, in
+vcpkg as `smspp[core,frankwolfe]`, and in the other channels that the
+[installation
+guide](https://gitlab.com/smspp/smspp-project/-/wikis/Installing-SMS++) of
+SMS++ lists. What follows is about building it yourself.
 
 ### Requirements
 

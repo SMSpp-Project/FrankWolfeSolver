@@ -84,11 +84,18 @@ void fold_objectives( AbstractBlock * copy )
 				"Objective of a Block with sub-Block is not "
 				"linear" ) );
 
+ // each Block with the weight of its Objective in copy [see
+ // Block::set_objective_weight()], by which its terms are moved
  std::vector< Block * > tree( copy->get_nested_Blocks().begin() ,
 			      copy->get_nested_Blocks().end() );
+ std::vector< double > wt;
+ for( auto b : tree )
+  wt.push_back( b->get_objective_weight() );
  for( std::size_t t = 0 ; t < tree.size() ; ++t ) {
-  for( auto sub : tree[ t ]->get_nested_Blocks() )
+  for( auto sub : tree[ t ]->get_nested_Blocks() ) {
    tree.push_back( sub );
+   wt.push_back( wt[ t ] * sub->get_objective_weight() );
+   }
   auto obj = dynamic_cast< FRealObjective * >( tree[ t ]->get_objective() );
   if( ! obj )
    continue;
@@ -96,7 +103,8 @@ void fold_objectives( AbstractBlock * copy )
   if( ! lf )
    throw( std::invalid_argument( "IntegralityBarrierSolver::build: the "
 				 "Objective of a sub-Block is not linear" ) );
-  const double sign = ( obj->get_sense() == robj->get_sense() ) ? 1 : -1;
+  const double sign = ( ( obj->get_sense() == robj->get_sense() ) ? 1 : -1 )
+                     * wt[ t ];
   for( Block::Index i = 0 ; i < lf->get_num_active_var() ; ++i ) {
    const auto c = lf->get_coefficient( i );
    if( c == 0 )

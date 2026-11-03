@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-03
+
+### Added
+
+- the weight of the Objective of a `Block` [see
+  `Block::set_objective_weight()`]: `FrankWolfeSolver` writes into the
+  Objective of each sub-Block the direction divided by its weight, which the
+  LMO does not see, and multiplies by it the values of the sub-Block;
+  `IntegralityBarrierSolver` moves the terms of each nested Objective into the
+  root with their weight
+
+- `intFWDirection` `eDirPrimalDual`, the primal-dual bundle Frank-Wolfe
+  method: the master problem of the current gradient and of the aggregate
+  minimizes an upper bound on the gap the direction gives, built out of the
+  vertex of the aggregate, of how fast its linear function grows away from
+  it on the feasible region of each sub-Block, a Euclidean ball or a box,
+  with a linear cost of its own, and of the diameter of that region, so that
+  the bound stays finite where the growth vanishes; a step that does not
+  pass the test of `dblFWAccept` is done as `intFWOnReject` says, and the
+  direction the oracle is asked with last becomes the aggregate; only with
+  `AlgVanilla`
+
+- `intFWOnReject` `eRejStay`, under `eDirPrimalDual`: a refused step is not
+  taken, nothing is evaluated anew and the oracle is not asked again, the
+  refused direction becoming the aggregate, so that the bound never
+  decreases
+
+- the per-iteration log (`intLogVerb` 2) ends with the lower bound of the
+  iteration and the seconds since the start of `compute()`
+
+- the makefiles build the C++20 module `smspp.frankwolfesolver` when
+  `SMSppMOD` is not empty (e.g., `make SMSppMOD=1`), with clang++ 16 or
+  later [see `lib/makefile-mod` of SMS++]
+
+- `intFWCutPolicy` `eCutRelevant`, with `intFWCutPool` and `intFWCutActive`:
+  the master problem of `eDirBundleMP` is given, out of a pool of pieces,
+  the gradient of the current iterate, the pieces with the largest weights
+  in the previous master and those with the smallest linearization error
+  at the current iterate, the pool keeping the pieces the master is given
+  most often; the default `eCutOldest` keeps the newest pieces, as before
+
+- the per-iteration log (`intLogVerb` 2) also says what the step is taken
+  along (the gradient, the direction of the master, the same corrected, or
+  the gradient after a refusal), how many calls to the oracle have been made
+  so far, how many pieces of the master have a positive weight, the step,
+  its norm and its cosine with the previous one in the father `Variable`;
+  the final summary also says how many calls to the oracle have been made
+
+- the C++20 module `smspp.frankwolfesolver` (`src/FrankWolfeSolver.cppm`),
+  which exports every name that the headers declare at namespace scope and
+  re-exports `smspp`, so that a source file can write `import
+  smspp.frankwolfesolver;` in place of the `#include` of the headers; it is
+  built with the CMake option `SMSpp_BUILD_MODULE`, as the target
+  `SMS++::FrankWolfeSolver_module`
+
+### Changed
+
+- the README leaves the channels that distribute SMS++ to the
+  installation guide of the wiki (Installing-SMS++), keeping the names
+  of the packages of the module
+
+- the pipeline builds the module also with its makefiles, after CMake, and
+  runs on a change of the makefiles too [see `ci/makefile` of the umbrella]
+
+- `SMSpp_BUILD_MODULE` no longer stops the configuration when the C++20
+  module cannot be built, i.e., with a CMake older than 3.28, a generator
+  other than Ninja or Visual Studio, a compiler other than Clang 16 (with
+  `clang-scan-deps`) or MSVC 19.34, or a module it imports that is not
+  there: the option is turned off with a warning that says why, and the
+  build goes on with the headers [see `cmake/CheckModule.cmake` of SMS++]
+
+- the values in the log have 12 significant digits, the precision of the
+  stream being given back at the end of `compute()`: with the default 6 two
+  runs that differ by less than one part in a million looked the same
+
+### Fixed
+
+- on Windows, the executables that copy their DLLs next to themselves
+  are linked one at a time (a job pool of Ninja), since two copies of the
+  same DLL into one directory collided (e.g., with the clang++ of MSYS2)
+
+- with the compilers of MinGW (MSYS2) the target asks whoever links it
+  for the symbol that forces the module in, as with MSVC and on macOS:
+  the linker imports a DLL only for the symbols asked for, so that a
+  program that used none had the module left out and its classes
+  missing from the factory
+
+- the makefiles of the tests and of the tools build also with g++: they
+  take the option that stops at the first error and the one of the
+  debugging information, which clang++ and g++ spell differently
+  (`-ferror-limit=1` and `-glldb` against `-fmax-errors=1` and `-ggdb`),
+  from `SMSppSWERR` and `SMSppSWDBG` of `lib/makefile-OS` of SMS++
+
+- the pieces of the master problem of `eDirBundleMP` were kept from a
+  `compute()` to the next, where a `Modification` may have made them no
+  longer linearizations of the linking function, and the direction and the
+  bound they gave not valid; they are now dropped at every `compute()`, as
+  those of `eDirBundle` and `eDirAggregate` already were
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
@@ -152,6 +251,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RPATH relative to itself, so that an installed tree keeps working wherever
   it is moved
 
-[Unreleased]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.3.0...develop
+[Unreleased]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.4.0...develop
+[0.4.0]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.3.0...0.4.0
 [0.3.0]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.2.0...0.3.0
 [0.2.0]: https://gitlab.com/smspp/frankwolfesolver/-/compare/0.1.0...0.2.0
