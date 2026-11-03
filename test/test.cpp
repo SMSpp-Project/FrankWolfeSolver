@@ -21,11 +21,12 @@
  * dblFWAccept, with an eta of 0.5 and with one of 0.99, and with the
  * aggregate piece in place of the previous gradient, the correction of a
  * refused direction and the best bound found so far, and with the
- * primal-dual master, which on a box converges and never lowers its bound
- * when the optimum is a vertex, is only held to its bound otherwise, and
- * has to refuse a sub-Block that is not a box. A last case changes
- * the costs of a sub-Block and solves again, which is what a Solver
- * attached to a Block has to survive.
+ * primal-dual master, which on a box has to converge when a refused step
+ * is done again with the gradient or corrected, and, when it is not taken,
+ * never lowers its bound if the optimum is a vertex and is only held to
+ * its bound otherwise; it has to refuse a sub-Block that is not a box. A
+ * last case changes the costs of a sub-Block and solves again, which is
+ * what a Solver attached to a Block has to survive.
  *
  * Two corners of the solver are in the instance on purpose: a coordinate
  * whose box is a single point, and a ColVariable of the father Objective that
@@ -186,7 +187,8 @@ struct Case {
  std::string name;
  int algorithm , cvx_comb , direction;
  double accept = 0;       // dblFWAccept, 0 taking every direction
- int on_reject = 0;       // intFWOnReject, 1 correcting a refused direction
+ int on_reject = 0;       // intFWOnReject, 1 correcting a refused direction,
+                          // 2 not taking a refused step (eDirPrimalDual)
  int best = 0;            // intFWBestLB, 1 testing against the best bound
  };
 
@@ -512,7 +514,7 @@ bool check_fixed_step( void )
  // the integer parameters of the bundle directions refuse what is out
  for( auto [ name , bad ] : std::vector< std::pair< std::string , int > >{
        { "intFWDirection" , 5 } , { "intFWDirection" , -1 } ,
-       { "intFWOnReject" , 2 } , { "intFWBestLB" , 2 } ,
+       { "intFWOnReject" , 3 } , { "intFWBestLB" , 2 } ,
        { "intFWCutPolicy" , 2 } , { "intFWCutPool" , -1 } } ) {
   threw = false;
   try { set_par( fw , name , bad ); }
@@ -568,6 +570,7 @@ bool check_primal_dual( void )
   set_par( fw , "intCvxComb" , c.cvx_comb );
   set_par( fw , "intFWDirection" , c.direction );
   set_par( fw , "dblFWAccept" , c.accept );
+  set_par( fw , "intFWOnReject" , c.on_reject );
   set_par( fw , "intFWBestLB" , c.best );
   set_par( fw , "intMaxIter" , maxiter );
   set_par( fw , "dblRelAcc" , 1e-10 );
@@ -620,24 +623,29 @@ bool check_primal_dual( void )
   * its vertex is 2 | a_i | / ( u_i - l_i ) along each coordinate, which
   * vanishes where the gradient of the problem does at the optimum, i.e.
   * where the optimal coordinate is inside its interval: there the master
-  * keeps the aggregate, the refused steps pile up, and when a component of
-  * the aggregate gets to 0 the master starts again from the gradient and the
-  * bound may go down. With the data of main() some coordinates are inside,
-  * and the method is only held to the bound it gives. */
+  * keeps close to the aggregate and many steps are refused. With the data
+  * of main() some coordinates are inside: a refused step done again with
+  * the gradient has to converge, one not taken (eRejStay) is only held to
+  * the bound it gives. */
 
  const double opt = optimum();
  const double scale = std::max( 1.0 , std::abs( opt ) );
- run( { "primal-dual, eta 0.5, inner optimum" , 0 , 1 , 4 , 0.5 } , lb ,
-      2000 , value , bound , false , false );
+ ok &= run( { "primal-dual, eta 0.5, inner optimum" , 0 , 1 , 4 , 0.5 } ,
+	    lb , 200000 , value , bound , true , false );
+ ok &= run( { "primal-dual, corrected, inner optimum" , 0 , 1 , 4 , 0.5 ,
+	      1 } , lb , 200000 , value , bound , true , false );
+ run( { "primal-dual, step not taken, inner optimum" , 0 , 1 , 4 , 0.5 ,
+	2 } , lb , 2000 , value , bound , false , false );
  report( ( bound <= opt + tol * scale ) && ( value >= opt - tol * scale ) ,
-	 "primal-dual, eta 0.5, inner optimum: the value and the bound "
-	 "hold" );
+	 "primal-dual, step not taken, inner optimum: the value and the "
+	 "bound hold" );
 
  /* With every optimal coordinate at a vertex of its box, a margin of 1 away
   * from the unconstrained minimum, the gradient at the optimum is far from
   * 0 on all of them, and the growth constants have a positive minimum: the
-  * method has to converge and its bound has never to go down, whatever the
-  * test, with the best bound and on the objective at x. The father being
+  * method has to converge and, a refused step not being taken, its bound
+  * has never to go down, whatever the test, with the best bound and on the
+  * objective at x. The father being
   * separable, the oracle gives the optimal vertex at once, and the line
   * search stops short of it only from a point inside: the iterates start
   * from the centre of the boxes. */
@@ -651,13 +659,13 @@ bool check_primal_dual( void )
  const double vopt = optimum();
  const double vscale = std::max( 1.0 , std::abs( vopt ) );
  for( const Case & c : { Case{ "primal-dual, eta 0.5, vertex" , 0 , 1 , 4 ,
-			       0.5 } ,
+			       0.5 , 2 } ,
 			 Case{ "primal-dual, eta 0.99, vertex" , 0 , 1 , 4 ,
-			       0.99 } ,
+			       0.99 , 2 } ,
 			 Case{ "primal-dual, best bound, vertex" , 0 , 1 , 4 ,
-			       0.5 , 0 , 1 } ,
+			       0.5 , 2 , 1 } ,
 			 Case{ "primal-dual, objective at x, vertex" , 0 , 0 ,
-			       4 , 0.5 } } ) {
+			       4 , 0.5 , 2 } } ) {
   ok &= run( c , lb , 200000 , value , bound , true , true );
   report( ( lb.size() > 2 ) && ( drop( lb ) <= 1e-9 * vscale ) ,
 	  "  the bound never goes down, in " + std::to_string( lb.size() ) +
@@ -889,9 +897,9 @@ int main( void )
   { "vanilla, aggregate, both" ,        0 , 1 , 3 , 0.99 , 1 , 1 } ,
   { "BPCG, bundle, corrected" ,         2 , 1 , 1 , 0.99 , 1 } ,
   { "Away-step, aggregate, both" ,      1 , 1 , 3 , 0.5 , 1 , 1 } ,
-  // the primal-dual master with no test, which refuses only the steps that
-  // do not decrease the function [see check_primal_dual() for the others]
-  { "vanilla, primal-dual, no test" ,   0 , 1 , 4 , 0 } ,
+  // the primal-dual master with the least test, a refused step done again
+  // with the gradient [see check_primal_dual() for the others]
+  { "vanilla, primal-dual, eta 1e-6" ,  0 , 1 , 4 , 1e-6 } ,
   { "BPCG, objective at x" ,            2 , 0 , 0 } };
 
  bool all = true;

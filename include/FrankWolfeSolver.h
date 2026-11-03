@@ -294,7 +294,8 @@ class FrankWolfeSolver : public CDASolver
  /// what a refused bundle direction is replaced by (value of intFWOnReject)
  enum reject_type {
   eRejGradient = 0 ,  ///< the gradient, i.e. the by-the-book step
-  eRejCorrect  = 1    ///< the combination of the two that passes the test
+  eRejCorrect  = 1 ,  ///< the combination of the two that passes the test
+  eRejStay     = 2    ///< no step, the oracle not asked again [eDirPrimalDual]
   };
 
 /*--------------------------------------------------------------------------*/
@@ -484,26 +485,31 @@ class FrankWolfeSolver : public CDASolver
    *   without the test the method may stay at the same iterate for good.
    *
    * - eDirPrimalDual: the primal-dual bundle Frank-Wolfe method, whose
-   *   master problem of the same two pieces minimizes a quadratic upper
+   *   master problem of the same two pieces minimizes an upper
    *   bound on the gap the direction gives instead of the stabilized one.
    *   With a the aggregate, w_a the vertex the oracle has given for it,
    *   sigma its error at the current iterate x, g the gradient and, for
    *   the sub-Block j, kappa_j the constant for which
    *   < a_j , v_j - w_a,j > >= ( kappa_j / 2 ) || v_j - w_a,j ||^2 for
-   *   every v_j of its feasible region, the master is
+   *   every v_j of its feasible region and D_j the diameter of that
+   *   region, the master is
    *
    *     min { ( 1 - mu ) sigma + < a + mu ( g - a ) , x - w_a >
-   *           + sum_j mu^2 || g_j - a_j ||^2 / ( 2 kappa_j ) :
-   *           mu in [ 0 , 1 ] } ,
+   *           + sum_j psi_j( mu || g_j - a_j || ) : mu in [ 0 , 1 ] } ,
    *
+   *   psi_j( r ) = max { r s - ( kappa_j / 2 ) s^2 : s in [ 0 , D_j ] }
+   *   being r^2 / ( 2 kappa_j ) for r <= kappa_j D_j and linear past it,
+   *   so that each term stays finite as kappa_j goes to 0,
    *   and mu = 0, i.e. the aggregate alone, gives back the bound it gave
    *   before: the bound f( x ) - U of the iteration never decreases. The
    *   step towards the vertex is taken if it passes the test of
-   *   dblFWAccept (and decreases the function, whatever that parameter);
-   *   otherwise the iterate stays where it is, nothing is evaluated anew,
-   *   and the direction just refused becomes the aggregate the next
-   *   master starts from, the oracle is not asked again with the gradient
-   *   and intFWOnReject has no effect. The constants are known for a
+   *   dblFWAccept; otherwise intFWOnReject says what is done, and the
+   *   direction the oracle is asked with last becomes the aggregate the
+   *   next master starts from. Under eRejStay the iterate stays where it
+   *   is (also when the step does not decrease the function, whatever
+   *   dblFWAccept), nothing is evaluated anew and the oracle is not asked
+   *   again, the refused direction being the aggregate. The constants are
+   *   known for a
    *   sub-Block whose feasible region is a Euclidean ball of radius R_j,
    *   where kappa_j = || a_j || / R_j, and for a box, a product of
    *   intervals [ l_i , u_i ] each with its own constant
@@ -516,13 +522,10 @@ class FrankWolfeSolver : public CDASolver
    *   with all its quadratic coefficients equal and positive and no finite
    *   bound on the Variable, a box is finite bounds on all the Variable the
    *   linking function has in the sub-Block and nothing else. It needs
-   *   intAlgorithm AlgVanilla; if a component of a is 0 where g is not, the
-   *   master falls back to the gradient, as in the first iteration, and the
-   *   bound may then go down. The constants of a box vanish along the
+   *   intAlgorithm AlgVanilla. The constants of a box vanish along the
    *   coordinates whose optimal value is inside their interval, the
-   *   gradient being 0 there, and then the master keeps the aggregate and
-   *   the refused steps pile up until such a fall back: on a box the
-   *   method converges as its theory says when the optimum is a vertex.
+   *   gradient being 0 there, and the theory, which asks kappa_j > 0, no
+   *   longer holds: the terms of those coordinates are then linear in mu.
    *
    * The information the second mode uses is the one the method has already
    * paid for: no evaluation is added [see the file documentation for where
@@ -557,7 +560,9 @@ class FrankWolfeSolver : public CDASolver
    * G / ( eta ( U - G ) ), whose step is known to pass the test; when it
    * does not decrease the function, the gradient is taken as in the first
    * case. Either way the cost is one more call to the oracle, and no further
-   * master problem. Has no effect when dblFWAccept is 0. */
+   * master problem. With eRejStay, only under eDirPrimalDual, no step is
+   * taken and the oracle is not asked again [see eDirPrimalDual]; elsewhere
+   * it is eRejGradient. Has no effect when dblFWAccept is 0. */
 
   intFWBestLB ,
   ///< whether the best bound found so far replaces the one of the iteration

@@ -686,9 +686,9 @@ void FrankWolfeSolver::set_par( idx_type par , int value )
    f_init_point = value;
    return;
   case( intFWOnReject ):
-   if( ( value != eRejGradient ) && ( value != eRejCorrect ) )
+   if( ( value < eRejGradient ) || ( value > eRejStay ) )
     throw( std::invalid_argument( "FrankWolfeSolver::set_par: intFWOnReject "
-                                  "must be 0 or 1" ) );
+                                  "must be 0, 1 or 2" ) );
    f_on_reject = value;
    return;
   case( intFWBestLB ):
@@ -1401,14 +1401,25 @@ void FrankWolfeSolver::primal_dual_direction( OFValue fx )
   for( Index p = 0 ; p < G ; ++p )
    slope += ( f_grad[ p ] - f_agg[ p ] ) * ( f_xval[ p ] - f_pd_w[ p ] );
 
-  // a ball adds || g_j - a_j ||^2 R_j / || a_j + c_j ||, a box the same for
-  // each coordinate with k_i = 2 | a_i + c_i | / ( u_i - l_i ), c being the
-  // cost of the sub-Block the oracle is given; a component of a + c that is
-  // 0 does not grow anywhere, and there is no bound to keep. On a ball whose
-  // sub-Block has Variable the father does not see, the norm of a + c is
-  // taken on those the father sees, which only makes k_j smaller
-  OFValue curv = 0;
-  bool restart = false;
+  /* With d_j = g_j - a_j, b_j = 2 || a_j + c_j || and D_j the diameter of
+   * the feasible region of the sub-Block j (2 R_j for a ball, u_i - l_i for
+   * a coordinate of a box, taken one by one), the growth of < a_j , . >
+   * away from w_j gives, at distance s <= D_j,
+   *
+   *   < z_j - a_j , w_j - v_j > - < a_j , v_j - w_j >
+   *     <= mu || d_j || s - ( b_j / ( 2 D_j ) ) s^2 ,
+   *
+   * whose maximum over s in [ 0 , D_j ] is the quadratic of the closed form
+   * when mu || d_j || <= b_j and the linear mu || d_j || D_j - b_j D_j / 2
+   * past it. Each term is convex in mu and stays finite as a_j + c_j goes
+   * to 0, where it is just mu || d_j || D_j: the master is the minimum over
+   * mu in [ 0 , 1 ] of the slope times mu plus their sum, whose derivative
+   * is nondecreasing and piecewise linear with a kink at mu = b_j / || d_j ||
+   * for each term. c is the cost of the sub-Block the oracle is given; on a
+   * ball whose sub-Block has Variable the father does not see, the norm of
+   * a + c is taken on those the father sees, which only makes b_j smaller */
+  struct Term { OFValue kink , n , D , b; };
+  std::vector< Term > terms;
   for( Index j = 0 ; j < f_nsb ; ++j ) {
    const bool ball = ( f_pd_radius[ j ] > 0 );
    OFValue na = 0 , nd = 0;
@@ -1421,26 +1432,46 @@ void FrankWolfeSolver::primal_dual_direction( OFValue fx )
      }
     else
      if( ( di != 0 ) && ( f_pd_width[ p ] > 0 ) ) {
-      if( ap != 0 )
-       curv += di * di * f_pd_width[ p ] / ( 2 * std::abs( ap ) );
-      else
-       restart = true;
+      const OFValue n = std::abs( di ) , b = 2 * std::abs( ap );
+      terms.push_back( { b / n , n , f_pd_width[ p ] , b } );
       }
     }
    if( nd > 0 ) {
-    if( na > 0 )
-     curv += f_pd_radius[ j ] * nd / std::sqrt( na );
-    else
-     restart = true;
+    const OFValue n = std::sqrt( nd ) , b = 2 * std::sqrt( na );
+    terms.push_back( { b / n , n , 2 * f_pd_radius[ j ] , b } );
     }
    }
 
-  if( ! restart ) {
-   if( curv > 0 )
-    mu = std::min( OFValue( 1 ) , std::max( OFValue( 0 ) , - slope / curv ) );
-   else
-    mu = ( slope < 0 ) ? 1 : 0;
+  // the derivative at mu is slope + sum_j n_j D_j over the terms already
+  // linear (kink <= mu) + mu sum_j n_j^2 D_j / b_j over the others
+  std::sort( terms.begin() , terms.end() ,
+             []( const Term & l , const Term & r ) {
+              return( l.kink < r.kink ); } );
+  OFValue A = slope , B = 0;
+  for( const auto & tm : terms )
+   if( tm.b > 0 )
+    B += tm.n * tm.n * tm.D / tm.b;
+  mu = 1;
+  OFValue lo = 0;
+  for( std::size_t k = 0 ; ; ++k ) {
+   const OFValue hi = ( k < terms.size() ) ?
+                      std::min( terms[ k ].kink , OFValue( 1 ) ) : 1;
+   if( hi > lo ) {
+    if( A + B * lo >= 0 ) { mu = lo; break; }
+    if( A + B * hi >= 0 ) { mu = - A / B; break; }
+    }
+   if( ( k >= terms.size() ) || ( terms[ k ].kink >= 1 ) )
+    break;
+   const auto & tm = terms[ k ];
+   A += tm.n * tm.D;
+   if( tm.b > 0 )
+    B -= tm.n * tm.n * tm.D / tm.b;
+   lo = std::max( lo , tm.kink );
    }
+  if( ( mu > 0 ) && ( mu < 1 ) && ( A + B * mu < 0 ) )
+   mu = 1;   // only rounding can get here
+  if( mu < 0 )
+   mu = 0;
 
   if( mu < 1 ) {
    f_bdir.resize( G );
@@ -2440,9 +2471,10 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    // the decrease the gradient promises along the step towards the vertex
    const OFValue dec = f_max ? ( mv_sum - cost_x ) : ( cost_x - mv_sum );
 
-   // eDirPrimalDual asks the oracle once: a step that does not pass the test
-   // is not taken, and what the trial has given is its new bound
-   if( primal_dual ) {
+   // under eDirPrimalDual and eRejStay the oracle is asked once: a step that
+   // does not pass the test is not taken, and what the trial has given is
+   // its new bound
+   if( primal_dual && ( f_on_reject == eRejStay ) ) {
     if( small_gap( gap ) || ( ( dec > 0 ) && ( dec >= f_accept * gap ) ) ) {
      if( p_dir != & f_grad )
       ++f_n_accepted;
@@ -2465,13 +2497,20 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    // refused: corrected once, if intFWOnReject asks for it and the direction
    // still decreases the function, else the gradient
    ++f_n_rejected;
-   if( ( ! corrected ) && correct_direction( dec , cert ) ) {
+   if( ( ! corrected ) && correct_direction( dec , cert ) )
     corrected = true;
-    continue;
+   else {
+    p_dir = & f_grad;
+    f_sigma = 0;
+    fell_back = true;
     }
-   p_dir = & f_grad;
-   f_sigma = 0;
-   fell_back = true;
+
+   // under eDirPrimalDual the direction the oracle is now asked with is the
+   // new aggregate, its vertex being the one the next trial gives
+   if( primal_dual ) {
+    f_agg = *p_dir;
+    f_agg_b = father_val - dir_dot( f_xval ) - f_sigma;
+    }
    }
 
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
@@ -2766,13 +2805,13 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
    // refused: corrected once, if intFWOnReject asks for it and the direction
    // still decreases the function, else the gradient
    ++f_n_rejected;
-   if( ( ! corrected ) && correct_direction( dec , cert ) ) {
+   if( ( ! corrected ) && correct_direction( dec , cert ) )
     corrected = true;
-    continue;
+   else {
+    p_dir = & f_grad;
+    f_sigma = 0;
+    fell_back = true;
     }
-   p_dir = & f_grad;
-   f_sigma = 0;
-   fell_back = true;
    }
 
   if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }

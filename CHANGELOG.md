@@ -18,13 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `intFWDirection` `eDirPrimalDual`, the primal-dual bundle Frank-Wolfe
   method: the master problem of the current gradient and of the aggregate
-  minimizes a quadratic upper bound on the gap the direction gives, built
-  out of the vertex of the aggregate and of how fast its linear function
-  grows away from it on the feasible region of each sub-Block, a Euclidean
-  ball or a box, with a linear cost of its own; a step that does not pass
-  the test of `dblFWAccept` is not taken, nothing is evaluated anew, and the
-  direction refused becomes the aggregate, so that the bound never
-  decreases; only with `AlgVanilla`
+  minimizes an upper bound on the gap the direction gives, built out of the
+  vertex of the aggregate, of how fast its linear function grows away from
+  it on the feasible region of each sub-Block, a Euclidean ball or a box,
+  with a linear cost of its own, and of the diameter of that region, so that
+  the bound stays finite where the growth vanishes; a step that does not
+  pass the test of `dblFWAccept` is done as `intFWOnReject` says, and the
+  direction the oracle is asked with last becomes the aggregate; only with
+  `AlgVanilla`
+
+- `intFWOnReject` `eRejStay`, under `eDirPrimalDual`: a refused step is not
+  taken, nothing is evaluated anew and the oracle is not asked again, the
+  refused direction becoming the aggregate, so that the bound never
+  decreases
 
 - the per-iteration log (`intLogVerb` 2) ends with the lower bound of the
   iteration and the seconds since the start of `compute()`
