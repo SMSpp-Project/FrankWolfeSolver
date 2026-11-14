@@ -192,7 +192,8 @@ void IntegralityBarrierFunction::set_y( std::vector< FunctionValue > && y ,
 {
  if( y.size() != v_rows.size() )
   throw( std::invalid_argument( "IntegralityBarrierFunction::set_y: " +
-				std::to_string( y.size() ) + " exponents for " +
+				std::to_string( y.size() ) +
+				" exponents for " +
 				std::to_string( v_rows.size() ) + " rows" ) );
  for( auto yk : y )
   if( ! ( yk >= 0 ) )

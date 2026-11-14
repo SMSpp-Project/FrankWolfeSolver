@@ -22,9 +22,9 @@
  * sub-Block feasible regions (integrality in the sub-Block is ignored).
  *
  * By a single parameter (intCvxComb) the solver can solve, at no extra oracle
- * cost, either the genuine composite objective over that feasible region or the
- * stronger Dantzig-Wolfe / perspective-cut relaxation of it; see the GENERAL
- * NOTES of the class and the intCvxComb parameter.
+ * cost, either the genuine composite objective over that feasible region or
+ * the stronger Dantzig-Wolfe / perspective-cut relaxation of it; see the
+ * GENERAL NOTES of the class and the intCvxComb parameter.
  *
  * The direction is the one the by-the-book method uses, i.e., the gradient of
  * the linking function at the current iterate is what the LMO is given, which
@@ -174,7 +174,8 @@ namespace SMSpp_di_unipi_it {
 /*--------------------------------------------------------------------------*/
 
  class LinearFunction;   ///< the linear objective case
- class DQuadFunction;    ///< the (diagonal) quadratic objective case (also Quad)
+ class DQuadFunction;    ///< the (diagonal) quadratic objective case (also
+                         ///< Quad)
  class QuadFunction;     ///< the full (off-diagonal) quadratic objective case
 
 /*--------------------------------------------------------------------------*/
@@ -218,17 +219,17 @@ namespace SMSpp_di_unipi_it {
  *
  * Let f_1, f_2 be the two objectives as functions of x in X: they agree on the
  * vertices of X (where the convex combination is trivial) and, by convexity of
- * h_j (Jensen), f_2(x) >= f_1(x) inside X, with f_2 the convex envelope of f_1.
- * Hence val(P2) >= val(P1): (P2) is the *stronger* relaxation. They coincide
- * iff all h_j are linear.
+ * h_j (Jensen), f_2(x) >= f_1(x) inside X, with f_2 the convex envelope of
+ * f_1. Hence val(P2) >= val(P1): (P2) is the *stronger* relaxation. They
+ * coincide iff all h_j are linear.
  *
  * (P2) is precisely the Dantzig-Wolfe / simplicial-decomposition bound: FW
  * generates the columns (sub-Block vertices) and the master recombines them
  * with their true costs. When conv(X_j) is the convex hull of the integer
  * solutions of a sub-Block and h_j is a convex-quadratic cost, (P2) is exactly
  * the value of the perspective reformulation / perspective-cut (P/C) bound of
- * that sub-Block -- so the solver can be used as a decomposition alternative to
- * an explicit DW / P-C reformulation.
+ * that sub-Block -- so the solver can be used as a decomposition alternative
+ * to an explicit DW / P-C reformulation.
  *
  * What makes it free: the oracle (LMO) is *identical* in the two modes -- it
  * always returns vertices accounting for the exact h_j. Only the
@@ -270,7 +271,8 @@ class FrankWolfeSolver : public CDASolver
 
  /// which line search to use (value of int_FWSlv_LineSearch)
  enum line_search_type {
-  LSAuto     = 0 , ///< exact if the father objective is quadratic, else agnostic
+  LSAuto     = 0 , ///< exact if the father objective is quadratic, else
+                   ///< agnostic
   LSAgnostic = 1 , ///< the open-loop 2/(t+2) rule
   LSExact    = 2 , ///< exact line search (needs a quadratic total objective)
   LSFixed    = 3   ///< the fixed step dblFWStep
@@ -310,24 +312,29 @@ class FrankWolfeSolver : public CDASolver
  enum algo_type {
   AlgVanilla  = 0 , ///< vanilla Frank-Wolfe (no active set)
   AlgAwayStep = 1 , ///< Away-step Frank-Wolfe (with active set)
-  AlgBPCG     = 2   ///< Blended Pairwise Conditional Gradient (with active set)
+  AlgBPCG     = 2   ///< Blended Pairwise Conditional Gradient (with active
+                    ///< set)
   };
 
- /// how the sub-Block objective is accounted in the value (value of intCvxComb)
+ /// how the sub-Block objective is accounted in the value (value of
+ /// intCvxComb)
  /** Selects which of two distinct (but closely related) problems the solver
   * actually solves; see intCvxComb and the GENERAL NOTES for the full
   * discussion. The two coincide when the sub-Block objectives are linear. */
  enum cvx_comb_type {
-  eObjAtX     = 0 , ///< sub-Block cost evaluated at the (fractional) iterate x_j
-  eObjCvxComb = 1   ///< sub-Block cost as the convex combination of vertex costs
+  eObjAtX     = 0 , ///< sub-Block cost evaluated at the (fractional) iterate
+                    ///< x_j
+  eObjCvxComb = 1   ///< sub-Block cost as the convex combination of vertex
+                    ///< costs
   };
 
  /// how Modification from the sub-Block are handled (value of intHandleMod)
  enum handle_mod_type {
-  eModReset = 0 , ///< any sub-Block Modification triggers a full re-analysis of
-                  ///< the cached structure (simple, always correct)
-  eModFine  = 1   ///< categorize each Modification and update only the affected
-                  ///< cached information (cheaper, keeps more across re-solves)
+  eModReset = 0 , ///< any sub-Block Modification triggers a full re-analysis
+                  ///< of the cached structure (simple, always correct)
+  eModFine  = 1   ///< categorize each Modification and update only the
+                  ///< affected cached information (cheaper, keeps more across
+                  ///< re-solves)
   };
 
 /** @} ---------------------------------------------------------------------*/
@@ -369,14 +376,15 @@ class FrankWolfeSolver : public CDASolver
 
   intAlgorithm ,
   ///< which Frank-Wolfe variant to run
-  /**< One of the algo_type values: AlgVanilla (default), AlgAwayStep, AlgBPCG. */
+  /**< One of the algo_type values: AlgVanilla (default), AlgAwayStep,
+   * AlgBPCG. */
 
   intMaxAtoms ,
   ///< maximum size of the active set (0 = unbounded)
   /**< Only used by the active-set variants (AlgAwayStep, AlgBPCG). When the
    * active set would exceed this size, the least-active atoms (smallest
-   * consecutive-active count, ties broken by smallest weight) are merged into a
-   * single *aggregate* atom (a convex combination preserving the iterate x).
+   * consecutive-active count, ties broken by smallest weight) are merged into
+   * a single *aggregate* atom (a convex combination preserving the iterate x).
    * 0 (the default) means no bound. */
 
   intCvxComb ,
@@ -386,63 +394,63 @@ class FrankWolfeSolver : public CDASolver
    * solves over the same feasible set X = prod_j conv(X_j); one of the
    * cvx_comb_type values:
    *
-   * - eObjAtX: each h_j is taken at the current (in general fractional) iterate
-   *   x_j. The solver minimizes the *genuine* composite objective
+   * - eObjAtX: each h_j is taken at the current (in general fractional)
+   *   iterate x_j. The solver minimizes the *genuine* composite objective
    *       F(x) = f_father(x) + sum_j h_j(x_j)
    *   over the convex hull X.
    *
-   * - eObjCvxComb (default): each h_j is replaced by its *convex envelope* over
-   *   the sub-Block vertices, i.e. the sub-Block cost is accounted as the convex
-   *   combination sum_k lambda_k^j h_j(v_k^j) of the oracle-returned vertices
-   *   (the lambda being the very weights with which the iterate is built). This
-   *   is the Dantzig-Wolfe / "disaggregated" relaxation: when h_j is a convex
-   *   function but conv(X_j) is the convex hull of integer points, this is
-   *   exactly the value that an explicit Dantzig-Wolfe reformulation yields, and
-   *   for a separable convex-quadratic sub-Block cost it coincides with the
-   *   perspective reformulation / perspective-cut (P/C) bound.
+   * - eObjCvxComb (default): each h_j is replaced by its *convex envelope*
+   *   over the sub-Block vertices, i.e. the sub-Block cost is accounted as the
+   *   convex combination sum_k lambda_k^j h_j(v_k^j) of the oracle-returned
+   *   vertices (the lambda being the very weights with which the iterate is
+   *   built). This is the Dantzig-Wolfe / "disaggregated" relaxation: when h_j
+   *   is a convex function but conv(X_j) is the convex hull of integer points,
+   *   this is exactly the value that an explicit Dantzig-Wolfe reformulation
+   *   yields, and for a separable convex-quadratic sub-Block cost it coincides
+   *   with the perspective reformulation / perspective-cut (P/C) bound.
    *
-   * The two coincide when all sub-Block objectives are linear; they differ only
-   * for nonlinear (e.g. quadratic) h_j, where convexity (Jensen) gives
+   * The two coincide when all sub-Block objectives are linear; they differ
+   * only for nonlinear (e.g. quadratic) h_j, where convexity (Jensen) gives
    *   sum_k lambda_k h_j(v_k) >= h_j( sum_k lambda_k v_k ) ,
    * so eObjCvxComb >= eObjAtX, i.e. the DW value is the *stronger* bound.
    *
-   * The remarkable point is that the *oracle is identical* in the two modes (it
-   * always returns vertices accounting for the exact sub-Block cost): only the
-   * value/gap/line-search bookkeeping differs, and the convex-combination value
-   * is linear in the step gamma (in the active-set variants it is just
-   * sum_i lambda_i c_i, already cached per atom), so it is obtained at no extra
-   * oracle cost. This is the simplicial-decomposition / Dantzig-Wolfe reading of
-   * Frank-Wolfe: FW generates the columns (sub-Block vertices) and the master
-   * recombines them with their true costs. See the GENERAL NOTES.
+   * The remarkable point is that the *oracle is identical* in the two modes
+   * (it always returns vertices accounting for the exact sub-Block cost): only
+   * the value/gap/line-search bookkeeping differs, and the convex-combination
+   * value is linear in the step gamma (in the active-set variants it is just
+   * sum_i lambda_i c_i, already cached per atom), so it is obtained at no
+   * extra oracle cost. This is the simplicial-decomposition / Dantzig-Wolfe
+   * reading of Frank-Wolfe: FW generates the columns (sub-Block vertices) and
+   * the master recombines them with their true costs. See the GENERAL NOTES.
    *
    * Implementation note (v1): the exact line search of eObjAtX is currently
    * available only when the sub-Block objectives are linear (where eObjAtX and
-   * eObjCvxComb coincide); for nonlinear h_j the eObjAtX mode falls back to the
-   * agnostic 2/(t+2) rule, so eObjCvxComb (the default) is the mode to use for
-   * nonlinear sub-Block objectives. An exact at-iterate line search for the
-   * nonlinear case is future work. */
+   * eObjCvxComb coincide); for nonlinear h_j the eObjAtX mode falls back to
+   * the agnostic 2/(t+2) rule, so eObjCvxComb (the default) is the mode to use
+   * for nonlinear sub-Block objectives. An exact at-iterate line search for
+   * the nonlinear case is future work. */
 
   intHandleMod ,
   ///< how to handle Modification coming from the sub-Block
   /**< Selects how the solver reacts to a Modification coming from a sub-Block
    * (or the father Objective), one of the handle_mod_type values. The solver
    * processes the queued Modification lazily, at the beginning of each
-   * compute(); between two compute() the sub-Block objectives are left in their
-   * original state (the per-iteration scatter is undone at the end of
+   * compute(); between two compute() the sub-Block objectives are left in
+   * their original state (the per-iteration scatter is undone at the end of
    * compute()), so that any external change to them is "clean".
    *
-   * - eModReset (default): any such Modification triggers a full re-analysis of
-   *   the cached structure (the sub-Block objective snapshots, the
+   * - eModReset (default): any such Modification triggers a full re-analysis
+   *   of the cached structure (the sub-Block objective snapshots, the
    *   gradient-to-sub-Block scatter map, the father quadratic cache). Simple
    *   and always correct.
    *
    * - eModFine: each Modification is categorized and only the affected cached
-   *   information is rebuilt --- a father-Objective change re-caches the father
-   *   quadratic structure only; a sub-Block-Objective change re-snapshots its
-   *   linear coefficients only; a change of the *variables* (or an
-   *   NBModification) still triggers a full re-analysis; a change to the
-   *   sub-Block feasible region needs no action here (the active set is rebuilt
-   *   from scratch each compute()).
+   *   information is rebuilt --- a father-Objective change re-caches the
+   *   father quadratic structure only; a sub-Block-Objective change
+   *   re-snapshots its linear coefficients only; a change of the *variables*
+   *   (or an NBModification) still triggers a full re-analysis; a change to
+   *   the sub-Block feasible region needs no action here (the active set is
+   *   rebuilt from scratch each compute()).
    *
    * Note: the finer handling becomes more valuable once the active set is
    * warm-started across compute() (so that atoms persist and may need a
@@ -835,9 +843,12 @@ class FrankWolfeSolver : public CDASolver
   /// direction written into it is divided by it, since the LMO does not see
   /// it, and its values are multiplied by it
   Function::FunctionValue w = 1;
-  Function * fun = nullptr;         ///< its objective Function (Lin/DQuad/Quad)
-  LinearFunction * lin = nullptr;   ///< == fun if a LinearFunction, else nullptr
-  DQuadFunction * dq = nullptr;     ///< == fun if a [D]QuadFunction, else nullptr
+  Function * fun = nullptr;         ///< its objective Function
+                                    ///< (Lin/DQuad/Quad)
+  LinearFunction * lin = nullptr;   ///< == fun if a LinearFunction, else
+                                    ///< nullptr
+  DQuadFunction * dq = nullptr;     ///< == fun if a [D]QuadFunction, else
+                                    ///< nullptr
   Solver * lmo = nullptr;           ///< the :Solver used as LMO
 
   /// snapshot of the original linear coefficients c_j (objective order)
@@ -878,13 +889,16 @@ class FrankWolfeSolver : public CDASolver
  struct Atom {
   Solution * f_sol = nullptr;                       ///< the father Solution
   double f_weight = 0;                              ///< the convex weight
-  std::vector< Function::FunctionValue > f_val;     ///< father active-var values
-  Function::FunctionValue f_ci = 0;                 ///< the sub-Block cost at the
-            ///< atom, sum_j h_j(atom_j) (the x-independent part of
-            ///< <grad F, atom>); for an aggregate, the convex combination of the
-            ///< merged atoms' costs, so sum_i lambda_i f_ci is the eObjCvxComb
-            ///< (Dantzig-Wolfe) sub-Block cost of the iterate (see intCvxComb)
-  int f_count = 0;                                  ///< consecutive-active count
+  std::vector< Function::FunctionValue > f_val;     ///< father active-var
+                                                    ///< values
+  Function::FunctionValue f_ci = 0;                 ///< the sub-Block cost at
+            ///< the atom, sum_j h_j(atom_j) (the x-independent part of
+            ///< <grad F, atom>); for an aggregate, the convex combination of
+            ///< the merged atoms' costs, so sum_i lambda_i f_ci is the
+            ///< eObjCvxComb (Dantzig-Wolfe) sub-Block cost of the iterate (see
+            ///< intCvxComb)
+  int f_count = 0;                                  ///< consecutive-active
+                                                    ///< count
   };
 
 /*--------------------------------------------------------------------------*/
@@ -894,7 +908,8 @@ class FrankWolfeSolver : public CDASolver
  /// set every parameter to its default value
  void set_default_parameters( void );
 
- /// release everything acquired in set_Block and restore the sub-Block objectives
+ /// release everything acquired in set_Block and restore the sub-Block
+ /// objectives
  void cleanup( void );
 
  /// (re)validate the father Objective and (re)cache its quadratic structure
@@ -1039,7 +1054,8 @@ class FrankWolfeSolver : public CDASolver
  /// evaluate the father Objective at the current point and fill f_grad
  void evaluate_gradient( void );
 
- /// scatter the father gradient into the sub-Block linear objectives (mode a,b)
+ /// scatter the father gradient into the sub-Block linear objectives (mode
+ /// a,b)
  void scatter( void );
 
  /// run all the sub-Block LMO and collect v_j and M_j(v_j) into v_sb
@@ -1184,7 +1200,8 @@ class FrankWolfeSolver : public CDASolver
  C05Function * f_fun = nullptr;     ///< the father C05Function
  DQuadFunction * f_dq_father = nullptr;  ///< == f_fun if a [D]QuadFunction
                                          ///< (enables the exact line search)
- QuadFunction * f_quad_father = nullptr; ///< == f_fun if a QuadFunction (off-diag)
+ QuadFunction * f_quad_father = nullptr; ///< == f_fun if a QuadFunction
+                                         ///< (off-diag)
 
  // cached (static) quadratic structure of the father, for the exact line
  // search: diagonal a_p and the off-diagonal terms ( r , c , q ), r > c
@@ -1204,7 +1221,8 @@ class FrankWolfeSolver : public CDASolver
 
  std::vector< Function::FunctionValue > f_pgrad;  ///< gradient of the previous
  std::vector< Function::FunctionValue > f_pxval;  ///< iterate it was taken at
- OFValue f_pval = 0;                              ///< value of the function there
+ OFValue f_pval = 0;                              ///< value of the function
+                                                  ///< there
 
  std::vector< Function::FunctionValue > f_agg;    ///< the aggregate piece
  OFValue f_agg_b = 0;  ///< its constant: the piece is f_agg_b + < f_agg , x >
@@ -1220,8 +1238,10 @@ class FrankWolfeSolver : public CDASolver
 
  std::vector< OFValue > f_pd_cost;
  ///< the cost of the sub-Block the oracle adds to each of them [the same]
- std::vector< Function::FunctionValue > f_xval;  ///< father active-var values at x
- std::vector< Function::FunctionValue > f_vval;  ///< father active-var values at v
+ std::vector< Function::FunctionValue > f_xval;  ///< father active-var values
+                                                 ///< at x
+ std::vector< Function::FunctionValue > f_vval;  ///< father active-var values
+                                                 ///< at v
 
  // algorithmic state - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
@@ -1234,13 +1254,16 @@ class FrankWolfeSolver : public CDASolver
  OFValue f_value = 0;          ///< F(x), best primal value found
  OFValue f_bound = 0;          ///< F(x) - gap, best bound found
  bool f_has_sol = false;       ///< whether a (primal) solution is available
- bool f_modified = false;      ///< whether the sub-Block objectives were modified
- Observer::ChnlName f_chnl = 0;      ///< the channel of the father in compute()
+ bool f_modified = false;      ///< whether the sub-Block objectives were
+                               ///< modified
+ Observer::ChnlName f_chnl = 0;      ///< the channel of the father in
+                                     ///< compute()
  Observer::ChnlName f_old_chnl = 0;  ///< the default channel it replaced
  /// linear coefficients of each sub-Block Objective when f_chnl was opened
  std::vector< std::vector< Function::FunctionValue > > f_c_open;
- bool f_lmo_infeas = false;    ///< whether the last run_LMOs found an infeasible
-                               ///< sub-Block (=> the father is infeasible)
+ bool f_lmo_infeas = false;    ///< whether the last run_LMOs found an
+                               ///< infeasible sub-Block (=> the father is
+                               ///< infeasible)
 
 /*--------------------------------------------------------------------------*/
 /*--------------------- PRIVATE PART OF THE CLASS --------------------------*/
