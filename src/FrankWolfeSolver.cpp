@@ -1805,14 +1805,14 @@ char FrankWolfeSolver::guts_of_process_modifications( const Modification * mod )
   // atoms stay feasible and no check is needed. This is the relax test of
   // LagBFunction: a constraint lhs <= f(x) <= rhs whose f shifts by a known
   // amount cannot be newly violated when shift > 0 and there is no upper bound
-  // (rhs == +INF), or shift < 0 and there is no lower bound (lhs == -INF).
+  // (rhs == +INF), or shift < 0 and there is no lower bound (lhs == -INF);
+  // the same holds when the change is only known to lie in an interval
+  // [see FunctionMod::shift_lower()], whose ends say the direction
   if( const auto c =
       dynamic_cast< const FRowConstraint * >( f->get_Observer() ) ) {
-   const auto sh = fm->shift();
    const auto INF = Inf< FunctionValue >();
-   if( ( ! std::isnan( sh ) ) &&
-       ( ( ( sh > 0 ) && ( c->get_rhs() >=  INF ) ) ||
-         ( ( sh < 0 ) && ( c->get_lhs() <= -INF ) ) ) )
+   if( ( ( fm->shift_lower() >= 0 ) && ( c->get_rhs() >=  INF ) ) ||
+       ( ( fm->shift_upper() <= 0 ) && ( c->get_lhs() <= -INF ) ) )
     return( 0 );  // surely relaxing: nothing to do
    }
 

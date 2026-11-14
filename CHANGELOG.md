@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- the test of a change of the Function of an `FRowConstraint` that cannot
+  tighten it reads the ends of the interval of the change
+  (`FunctionMod::shift_lower()`, `shift_upper()`), which say the same as
+  `shift()` when no interval is given, and no longer re-checks the atoms
+  after a change by 0
+
 ## [0.4.0] - 2026-11-03
 
 ### Added
