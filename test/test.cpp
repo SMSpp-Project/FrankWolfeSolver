@@ -167,8 +167,8 @@ AbstractBlock * build( std::vector< LinearFunction * > & costs ,
   obj->set_sense( Objective::eMin , eNoMod );
   sb->set_objective( obj );
 
-  sb->register_Solver( ( first && ( j == 0 ) ) ? first
-                                              : Solver::new_Solver( "BoxSolver" ) );
+  sb->register_Solver( ( first && ( j == 0 ) ) ?
+                       first : Solver::new_Solver( "BoxSolver" ) );
   father->add_nested_Block( sb );
   }
 
@@ -685,8 +685,8 @@ bool check_primal_dual( void )
  auto sb = static_cast< AbstractBlock * >( father->get_nested_Blocks()[ 0 ] );
  auto x = sb->get_static_variable_v< ColVariable >( "x" );
  auto row = new FRowConstraint( nullptr , - Inf< double >() , 100 ,
-				new LinearFunction( { { & ( *x )[ 0 ] , 1 } ,
-						      { & ( *x )[ 1 ] , 1 } } ) );
+		  new LinearFunction( { { & ( *x )[ 0 ] , 1 } ,
+					{ & ( *x )[ 1 ] , 1 } } ) );
  sb->add_static_constraint( *row , "row" );
  bool threw = false;
  try { fw->compute( false ); }

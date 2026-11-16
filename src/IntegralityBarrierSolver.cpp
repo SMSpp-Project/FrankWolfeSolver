@@ -265,8 +265,8 @@ bool IntegralityBarrierSolver::rounding_feasible( void )
   }
 
  for( Block::Index i = 0 ; i < n ; ++i )
-  static_cast< ColVariable * >( f_fun->get_active_var( i ) )->set_value(
-								      old[ i ] );
+  static_cast< ColVariable * >( f_fun->get_active_var( i ) )
+   ->set_value( old[ i ] );
  return( false );
  }
 
@@ -320,7 +320,8 @@ void IntegralityBarrierSolver::update_y( void )
     for( auto i : rows[ k ].idx ) {
      auto x = static_cast< ColVariable * >( f_fun->get_active_var( i ) );
      if( x->is_integer() &&
-	 ( std::abs( x->get_value() - std::round( x->get_value() ) ) > 1e-9 ) ) {
+	 ( std::abs( x->get_value() - std::round( x->get_value() ) ) >
+	   1e-9 ) ) {
       fractional = true;
       break;
       }
@@ -367,8 +368,9 @@ int IntegralityBarrierSolver::compute( bool changedvars )
    auto s = *std::next( slvrs.begin() , f_init_slvr );
    const int st = s->compute( false );
    if( ( st != kOK ) || ( ! s->has_var_solution() ) )
-    throw( std::runtime_error( "IntegralityBarrierSolver::compute: the "
-			       "Solver of the starting point has found none" ) );
+    throw( std::runtime_error(
+	       "IntegralityBarrierSolver::compute: the "
+	       "Solver of the starting point has found none" ) );
    s->get_var_solution();
    }
 
