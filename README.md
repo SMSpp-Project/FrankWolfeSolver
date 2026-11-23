@@ -154,7 +154,7 @@ all the required other makefiles, hence one should only need to edit the "main
 makefile" for compilation type (C++ compiler and its options) and it all should
 be good to go.
 
-Check the [SMS++ installation wiki](https://gitlab.com/smspp/smspp-project/-/wikis/Customize-the-configuration#location-of-required-libraries)
+Check the [SMS++ installation wiki](https://gitlab.com/smspp/smspp-project/-/wikis/Customize-the-configuration#location-of-external-libraries)
 for further details.
 
 
