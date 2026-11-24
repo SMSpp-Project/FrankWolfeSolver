@@ -11,6 +11,10 @@
  * in the interior, while the integer ones, the penalty being zero there,
  * stay global minima even if they lie on the boundary.
  *
+ * \author Francesca Demelas \n
+ *         Laboratoire d'Informatique de Paris Nord \n
+ *         Universite' Sorbonne Paris Nord \n
+ *
  * \author Antonio Frangioni \n
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
@@ -19,11 +23,7 @@
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \author Francesca Demelas \n
- *         Laboratoire d'Informatique de Paris Nord \n
- *         Universite' Sorbonne Paris Nord \n
- *
- * \copyright &copy; by Antonio Frangioni, Donato Meoli, Francesca Demelas
+ * \copyright &copy; by Francesca Demelas, Antonio Frangioni, Donato Meoli
  */
 /*--------------------------------------------------------------------------*/
 /*----------------------------- DEFINITIONS --------------------------------*/

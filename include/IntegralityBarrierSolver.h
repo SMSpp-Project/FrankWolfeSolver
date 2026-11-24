@@ -9,6 +9,10 @@
  * relaxation, changing the exponents of the barrier between one run of
  * Frank-Wolfe and the next.
  *
+ * \author Francesca Demelas \n
+ *         Laboratoire d'Informatique de Paris Nord \n
+ *         Universite' Sorbonne Paris Nord \n
+ *
  * \author Antonio Frangioni \n
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
@@ -17,11 +21,7 @@
  *         Dipartimento di Informatica \n
  *         Universita' di Pisa \n
  *
- * \author Francesca Demelas \n
- *         Laboratoire d'Informatique de Paris Nord \n
- *         Universite' Sorbonne Paris Nord \n
- *
- * \copyright &copy; by Antonio Frangioni, Donato Meoli, Francesca Demelas
+ * \copyright &copy; by Francesca Demelas, Antonio Frangioni, Donato Meoli
  */
 /*--------------------------------------------------------------------------*/
 /*----------------------------- DEFINITIONS --------------------------------*/
