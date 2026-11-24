@@ -1700,6 +1700,11 @@ void FrankWolfeSolver::run_LMOs( bool changedvars )
  auto run_one = [ changedvars ]( SubBlockData & d ) {
   try {
    d.status = d.lmo->compute( changedvars );
+   // an LMO stopped (say, by its time limit) before finding any point, or
+   // finding the sub-Block infeasible, has no vertex to give
+   d.has_v = ( d.status != kInfeasible ) && d.lmo->has_var_solution();
+   if( ! d.has_v )
+    return;
    d.value  = d.w * d.lmo->get_var_value();   // M_j(v_j), weighted
    d.lmo->get_var_solution();           // materialize v_j into the variables
    }
@@ -1751,13 +1756,17 @@ void FrankWolfeSolver::run_LMOs( bool changedvars )
   std::rethrow_exception( first );
 
  // a sub-Block whose (relaxed) feasible region is empty makes the product
- // region -- hence the father -- infeasible
- f_lmo_infeas = false;
+ // region -- hence the father -- infeasible; a sub-Block with no vertex
+ // leaves no step to take, and the method stops where it is
+ f_lmo_stop = kOK;
  for( const auto & d : v_sb )
   if( d.status == kInfeasible ) {
-   f_lmo_infeas = true;
+   f_lmo_stop = kInfeasible;
    break;
    }
+  else
+   if( ( ! d.has_v ) && ( f_lmo_stop == kOK ) )
+    f_lmo_stop = ( d.status == kOK ) ? kError : d.status;
  }
 
 /*--------------------------------------------------------------------------*/
@@ -2356,7 +2365,7 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
   p_dir = & f_grad;          // nothing recorded yet: this is the gradient
   scatter();
   run_LMOs( true );
-  if( f_lmo_infeas ) { f_has_sol = false; return( kInfeasible ); }
+  if( f_lmo_stop != kOK ) { f_has_sol = false; return( f_lmo_stop ); }
   OFValue mv_init = 0;
   for( auto & d : v_sb )
    mv_init += d.value;
@@ -2421,7 +2430,7 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
    mx_sum = eval_modified_objective();           // sum_j M_j(x_j)
 
    run_LMOs( true );
-   if( f_lmo_infeas )
+   if( f_lmo_stop != kOK )
     break;
    mv_sum = 0;
    for( auto & d : v_sb )
@@ -2524,7 +2533,15 @@ int FrankWolfeSolver::compute_vanilla( bool changedvars )
     }
    }
 
-  if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
+  if( f_lmo_stop == kInfeasible ) {
+   f_has_sol = false;
+   status = kInfeasible;
+   break;
+   }
+  if( f_lmo_stop != kOK ) {  // no vertex: the iterate stays as it is
+   status = f_lmo_stop;
+   break;
+   }
 
   f_niter = t; f_last_gap = gap;             // for the final-summary log
 
@@ -2655,7 +2672,7 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
   evaluate_gradient();
   scatter();
   run_LMOs( true );
-  if( f_lmo_infeas ) { f_has_sol = false; return( kInfeasible ); }
+  if( f_lmo_stop != kOK ) { f_has_sol = false; return( f_lmo_stop ); }
   OFValue mv_init = 0;
   for( auto & d : v_sb )
    mv_init += d.value;
@@ -2751,7 +2768,7 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
 
    // FW vertex: the LMO of grad F
    run_LMOs( true );
-   if( f_lmo_infeas )
+   if( f_lmo_stop != kOK )
     break;
    mv_sum = 0;
    for( auto & d : v_sb )
@@ -2826,7 +2843,15 @@ int FrankWolfeSolver::compute_active_set( bool changedvars )
     }
    }
 
-  if( f_lmo_infeas ) { f_has_sol = false; status = kInfeasible; break; }
+  if( f_lmo_stop == kInfeasible ) {
+   f_has_sol = false;
+   status = kInfeasible;
+   break;
+   }
+  if( f_lmo_stop != kOK ) {  // no vertex: the iterate stays as it is
+   status = f_lmo_stop;
+   break;
+   }
 
   f_niter = t; f_last_gap = fw_gap;          // for the final-summary log
 

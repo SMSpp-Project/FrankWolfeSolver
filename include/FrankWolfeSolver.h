@@ -872,6 +872,8 @@ class FrankWolfeSolver : public CDASolver
   Function::FunctionValue value = 0;
   Function::FunctionValue mx = 0;   ///< M_j(x_j) at the current iterate x
   int status = 0;                   ///< return code of the last LMO call
+  bool has_v = false;               ///< whether the last LMO call has left
+                                    ///< a vertex v_j [see run_LMOs()]
   std::exception_ptr excp;          ///< exception thrown by the LMO (parallel)
   };
 
@@ -1261,9 +1263,10 @@ class FrankWolfeSolver : public CDASolver
  Observer::ChnlName f_old_chnl = 0;  ///< the default channel it replaced
  /// linear coefficients of each sub-Block Objective when f_chnl was opened
  std::vector< std::vector< Function::FunctionValue > > f_c_open;
- bool f_lmo_infeas = false;    ///< whether the last run_LMOs found an
-                               ///< infeasible sub-Block (=> the father is
-                               ///< infeasible)
+ /// kOK if the last run_LMOs() has a vertex of every sub-Block, kInfeasible
+ /// if a sub-Block is infeasible (=> so is the father), else the return code
+ /// of an LMO that has left no vertex (say, kStopTime), kError if that is kOK
+ int f_lmo_stop = kOK;
 
 /*--------------------------------------------------------------------------*/
 /*--------------------- PRIVATE PART OF THE CLASS --------------------------*/

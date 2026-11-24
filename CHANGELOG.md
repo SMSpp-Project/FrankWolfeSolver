@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the one of `smspp_install_rpath()`, with no test on the system or on the
   compiler [see `SMSppModule.cmake` of SMS++]; CMake 3.24 or later is needed
 
+### Fixed
+
+- FrankWolfeSolver stops at its iterate, returning the status of the LMO,
+  when an LMO ends with no vertex (say, stopped by its time limit before
+  finding any point), instead of asking it for a solution it does not have,
+  which a :MILPSolver on HiGHS reports by throwing
+
 ## [0.5.0] - 2026-11-16
 
 
