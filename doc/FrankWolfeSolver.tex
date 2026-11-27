@@ -226,28 +226,64 @@ oracle and the convex weights $\lambda$:
 \end{align}
 $\Pone$ evaluates each child cost $h_j$ \emph{at the} (generally fractional)
 \emph{iterate} $x_j$; $\Ptwo$ accounts for it as the \emph{convex combination of
-the vertex costs}, i.e.\ it replaces $h_j$ by its \emph{convex envelope} over the
-generated vertices.
+the vertex costs}, where the $\lambda^j_k$ are the weights that the combination
+gives to the vertices of child $j$ (i.e., the marginals of $\lambda$ on child
+$j$); i.e.\ it replaces $h_j$ by the convex envelope of its restriction to the
+vertices, as made precise below.
 
 \subsection{The relationship between the two}
 
-Let $f_1,f_2$ be the two objectives as functions of $x\in X$.
+We assume that each $h_j$ is convex on $\conv(X_j)$ (i.e., $\beta=0$ or $q_j$
+convex), and that the vertices range over all the points of $X_j$, as the oracle
+may return any of them; for $y\in\conv(X_j)$ let
+\[
+  \check h_j(y) \;=\; \inf\Big\{\, \textstyle\sum_k \mu_k\, h_j(v_k)\ :\
+    v_k\in X_j,\ \mu\geq 0,\ \sum_k\mu_k=1,\ \sum_k\mu_k v_k=y \,\Big\},
+\]
+the infimum being over the finite convex combinations, which is the convex
+envelope over $\conv(X_j)$ of the restriction of $h_j$ to $X_j$ (the largest
+convex function on $\conv(X_j)$ that is not larger than $h_j$ on $X_j$). Let
+$f_1(x)=\ffat(x)+\sum_j h_j(x_j)$ and $f_2(x)=\ffat(x)+\sum_j\check h_j(x_j)$ for
+$x\in X$.
 
 \begin{proposition}\label{prop:jensen}
-$f_1$ and $f_2$ agree on the vertices of $X$. By convexity of $h_j$ (Jensen's
-inequality), $f_2(x)\geq f_1(x)$ inside $X$, and $f_2$ is the \emph{convex
-envelope} of $f_1$. Consequently $\mathrm{val}\,\Ptwo \geq \mathrm{val}\,\Pone$:
-$\Ptwo$ is the \emph{stronger} relaxation. The two coincide if and only if all the
-$h_j$ are linear.
+$\mathrm{val}\,\Pone=\inf_{x\in X}f_1(x)$ and $\mathrm{val}\,\Ptwo=\inf_{x\in X}
+f_2(x)$. Moreover, $f_1$ and $f_2$ agree on $X_1\times\cdots\times X_k$, and
+$f_2(x)\geq f_1(x)$ for all $x\in X$; consequently $\mathrm{val}\,\Pone\leq
+\mathrm{val}\,\Ptwo\leq\inf\{\, f_1(x) : x\in X_1\times\cdots\times X_k \,\}$,
+i.e., $\Ptwo$ is a relaxation of the problem over the original regions that is
+at least as strong as $\Pone$. If $\check h_j=h_j$ on $\conv(X_j)$ for all $j$,
+which holds in particular if each $h_j$ is affine (e.g., $\alpha=1$ and $\beta=0$)
+or if each $X_j$ is convex, then $f_1=f_2$ and $\mathrm{val}\,\Pone=\mathrm{val}\,
+\Ptwo$.
 \end{proposition}
 
-\begin{proof}[Proof (sketch)]
-On a vertex $\lambda$ is degenerate, so the two children terms coincide. For
-$x_j=\sum_k\lambda_k^j v_k^j$ with $h_j$ convex, Jensen gives
-$h_j(x_j)\le\sum_k\lambda_k^j h_j(v_k^j)$, whence $f_1\le f_2$ pointwise; the
-difference is zero exactly when each $h_j$ is affine on the active vertices, i.e.\
-(for every choice of vertices) when the $h_j$ are linear.
+\begin{proof}
+The first equality is the definition of $\Pone$. As for the second, for a fixed
+$x\in X$ the children term of $\Ptwo$ is minimized separately for each $j$ over
+the combinations of the vertices of child $j$ whose point is $x_j$, which gives
+$\sum_j\check h_j(x_j)$; the weights of the vertices of the whole $X$ that
+attain given marginals exist, e.g., their product. If $x_j\in X_j$, the
+combination giving weight $1$ to $x_j$ shows $\check h_j(x_j)\leq h_j(x_j)$. For
+any combination with $\sum_k\mu_k v_k=x_j$, the convexity of $h_j$ (Jensen's
+inequality) gives $h_j(x_j)\leq\sum_k\mu_k h_j(v_k)$, whence $h_j(x_j)\leq\check
+h_j(x_j)$ on $\conv(X_j)$, hence $f_1\leq f_2$ on $X$ and $f_1=f_2$ on
+$X_1\times\cdots\times X_k$. Taking infima over $X\supseteq X_1\times\cdots\times
+X_k$ gives the chain of inequalities. Finally, if $h_j$ is affine then
+$\sum_k\mu_k h_j(v_k)=h_j(\sum_k\mu_k v_k)$ for every combination, so that
+$\check h_j=h_j$; if $X_j$ is convex then every $y\in\conv(X_j)$ is in $X_j$, and
+$\check h_j(y)=h_j(y)$ by the two inequalities above.
 \end{proof}
+
+\begin{remark}
+The converse of the last statement does not hold: $\mathrm{val}\,\Pone=
+\mathrm{val}\,\Ptwo$ may happen with nonlinear $h_j$ and nonconvex $X_j$, e.g.,
+when $f_1$ attains its infimum over $X$ at a point of $X_1\times\cdots\times
+X_k$, where $f_2=f_1$. With the vertices
+generated so far in place of the whole $X_j$, $\check h_j$ is defined over their
+convex hull only, and the same argument compares $\Ptwo$ with $\Pone$ restricted
+to that hull.
+\end{remark}
 
 \paragraph{Dantzig-Wolfe / perspective-cut reading.}
 $\Ptwo$ is precisely the \emph{Dantzig-Wolfe / simplicial-decomposition} bound:
